@@ -87,6 +87,17 @@ function App() {
     localStorage.setItem("smart_read_history", JSON.stringify(updatedHistory));
   };
 
+  // Clears every single item from the sidebar and local cache
+  const clearAllHistory = () => {
+    const confirmClear = window.confirm(
+      "Are you sure you want to wipe your entire summary history? This cannot be undone.",
+    );
+    if (confirmClear) {
+      setHistory([]);
+      localStorage.removeItem("smart_read_history");
+    }
+  };
+
   const handleClear = () => {
     setUrl("");
     setTitle("");
@@ -98,10 +109,19 @@ function App() {
     <div className="min-h-screen bg-slate-900 text-slate-100 flex flex-col md:flex-row">
       {/* LEFT COLUMN: History Sidebar */}
       <aside className="w-full md:w-80 bg-slate-950 border-b md:border-b-0 md:border-r border-slate-800 p-6 flex flex-col shrink-0">
-        <h2 className="text-xl font-bold tracking-wide text-slate-200 mb-4 flex items-center gap-2">
-          <span>⏳</span> Recent Summaries
-        </h2>
-
+        <div className="flex justify-between items-center mb-4">
+          <h2 className="text-xl font-bold tracking-wide text-slate-200 flex items-center gap-2">
+            <span>⏳</span> Recent Summaries
+          </h2>
+          {history.length > 0 && (
+            <button
+              onClick={clearAllHistory}
+              className="text-xs font-semibold text-slate-500 hover:text-red-400 transition-colors duration-150 bg-slate-900 border border-slate-800 hover:border-red-950 px-2 py-1 rounded-md"
+            >
+              Clear All
+            </button>
+          )}
+        </div>
         <div className="flex-1 overflow-y-auto space-y-3 pr-1 max-h-64 md:max-h-[calc(100vh-120px)]">
           {history.length === 0 ? (
             <p className="text-sm text-slate-500 italic mt-4 text-center">

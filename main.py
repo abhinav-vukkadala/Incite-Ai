@@ -1,5 +1,5 @@
 import os
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 import requests
 from bs4 import BeautifulSoup
 from google import genai
@@ -7,14 +7,21 @@ from google.genai.errors import APIError
 from dotenv import load_dotenv
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 
 load_dotenv()
 
 app = FastAPI()
 
+limiter = Limiter(key_func=get_remote_address)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],  # Allow your React app's address
+    allow_origins=["http://localhost:5173", os.getenv("FRONTEND_URL","")],  # Allow your React app's address
     allow_credentials=True,
     allow_methods=["*"],  # Allow all HTTP methods (POST, GET, etc.)
     allow_headers=["*"],  # Allow all security/content headers
@@ -46,7 +53,7 @@ def extract_article_data(url: str):
         
         paragraphs = soup.find_all("p")
         body_paragraphs = [p.get_text(strip=True) for p in paragraphs if len(p.get_text(strip=True)) > 30]
-        full_body_text = "\n\n".join(body_paragraphs)
+        full_body_text = "\n\n".join(body_paragraphs) [:8000]
         
         return {"title": title_text, "body": full_body_text}
     except requests.exceptions.Timeout:
@@ -85,6 +92,7 @@ def generate_summary(article_text: str, length: str, bullets: int):
         response = client.models.generate_content(
             model='gemini-2.5-flash',
             contents=prompt,
+            config={"timeout":30}
         )
         
         bullet_points = [line.strip("- * ") for line in response.text.strip().split("\n") if line.strip()]
@@ -104,7 +112,8 @@ def generate_summary(article_text: str, length: str, bullets: int):
 
 
 @app.post("/scrape")
-def scrape_endpoint(input_data: ScrapeRequest):
+@limiter.limit("5/minute")
+def scrape_endpoint(input_data: ScrapeRequest, request: Request):
     target_url = input_data.url
     
     if not target_url.startswith(("http://", "https://")):
