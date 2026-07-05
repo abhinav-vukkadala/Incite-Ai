@@ -29,7 +29,7 @@ function App() {
     setTitle("");
 
     try {
-      const response = await fetch("http://localhost:8000/scrape", {
+      const response = await fetch("http://https://smart-read-backend.onrender.com/scrape", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
