@@ -92,7 +92,6 @@ def generate_summary(article_text: str, length: str, bullets: int):
         response = client.models.generate_content(
             model='gemini-2.5-flash',
             contents=prompt,
-            config={"timeout":30}
         )
         
         bullet_points = [line.strip("- * ") for line in response.text.strip().split("\n") if line.strip()]
