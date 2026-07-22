@@ -1,1 +1,103 @@
 @import "tailwindcss";
+
+@theme {
+  --color-surface-dim: #dadad9;
+  --color-outline-variant: #c2c8c0;
+  --color-secondary-fixed-dim: #c8c6c6;
+  --color-surface-container-lowest: #ffffff;
+  --color-surface: #faf9f8;
+  --color-primary-fixed-dim: #b0ceb4;
+  --color-tertiary-fixed: #e6e2df;
+  --color-on-error: #ffffff;
+  --color-surface-container-low: #f4f3f2;
+  --color-surface-bright: #faf9f8;
+  --color-surface-tint: #4a654f;
+  --color-primary-fixed: #cceacf;
+  --color-on-error-container: #93000a;
+  --color-secondary-container: #e4e2e1;
+  --color-error: #ba1a1a;
+  --color-on-surface-variant: #424842;
+  --color-on-secondary-fixed: #1b1c1c;
+  --color-on-primary: #ffffff;
+  --color-on-tertiary-fixed-variant: #484645;
+  --color-on-primary-fixed-variant: #334d38;
+  --color-error-container: #ffdad6;
+  --color-tertiary-container: #a5a29f;
+  --color-inverse-on-surface: #f1f0f0;
+  --color-surface-container-highest: #e3e2e1;
+  --color-on-primary-fixed: #062010;
+  --color-outline: #737972;
+  --color-on-secondary: #ffffff;
+  --color-inverse-primary: #b0ceb4;
+  --color-primary: #4a654f;
+  --color-primary-container: #8daa91;
+  --color-on-background: #1a1c1c;
+  --color-secondary-fixed: #e4e2e1;
+  --color-on-tertiary-fixed: #1c1b1a;
+  --color-surface-container: #eeeeed;
+  --color-on-tertiary: #ffffff;
+  --color-on-surface: #1a1c1c;
+  --color-on-secondary-fixed-variant: #474747;
+  --color-background: #faf9f8;
+  --color-inverse-surface: #2f3130;
+  --color-surface-variant: #e3e2e1;
+  --color-on-secondary-container: #656464;
+  --color-on-primary-container: #253f2b;
+  --color-surface-container-high: #e9e8e7;
+  --color-tertiary-fixed-dim: #c9c6c3;
+  --color-tertiary: #605e5c;
+  --color-secondary: #5f5e5e;
+  --color-on-tertiary-container: #3a3937;
+
+  --font-headline: 'Playfair Display', serif;
+  --font-body: 'Inter', sans-serif;
+}
+
+body {
+  background-color: #faf9f8;
+  color: #1a1c1c;
+  font-family: 'Inter', sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+.material-symbols-outlined {
+  font-family: 'Material Symbols Outlined';
+  font-weight: normal;
+  font-style: normal;
+  font-size: 24px;
+  line-height: 1;
+  letter-spacing: normal;
+  text-transform: none;
+  display: inline-block;
+  white-space: nowrap;
+  word-wrap: normal;
+  direction: ltr;
+  -webkit-font-smoothing: antialiased;
+}
+
+.academic-sidebar {
+  scrollbar-width: thin;
+  scrollbar-color: #c2c8c0 transparent;
+}
+
+.range-slider {
+  -webkit-appearance: none;
+  width: 100%;
+  height: 2px;
+  background: #c2c8c0;
+  outline: none;
+}
+
+.range-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 12px;
+  height: 12px;
+  background: #4a654f;
+  border-radius: 50%;
+  cursor: pointer;
+}
+
+.paper-texture {
+  background-image: url("https://www.transparenttextures.com/patterns/natural-paper.png");
+}

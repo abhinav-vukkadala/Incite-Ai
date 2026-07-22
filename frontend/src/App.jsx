@@ -6,64 +6,63 @@ function App() {
   const [summary, setSummary] = useState([]);
   const [title, setTitle] = useState("");
   const [error, setError] = useState("");
-  const [length, setLength] = useState("medium");
-  const [bullets, setBullets] = useState(3);
+  const [length, setLength] = useState("medium"); // short, medium, detailed
+  const [bullets, setBullets] = useState(5);
   const [copied, setCopied] = useState(false);
 
-  // State to hold all saved history items
   const [history, setHistory] = useState([]);
 
-  // Load saved history from localStorage when the app boots up
+  // Load history on initial mount
   useEffect(() => {
-    const savedHistory = localStorage.getItem("smart_read_history");
-    if (savedHistory) {
-      setHistory(JSON.parse(savedHistory));
+    const saved = localStorage.getItem("incite_ai_history") || localStorage.getItem("smart_read_history");
+    if (saved) {
+      setHistory(JSON.parse(saved));
     }
   }, []);
 
+  const lengthMapping = { 0: "short", 1: "medium", 2: "detailed" };
+  const reverseLengthMapping = { "short": 0, "medium": 1, "detailed": 2 };
+
   const handleScrape = async (e) => {
-    e.preventDefault();
+    if (e) e.preventDefault();
+    if (!url) return;
+
     setLoading(true);
     setError("");
-    setSummary([]);
-    setTitle("");
 
     try {
       const response = await fetch("https://smart-read-backend.onrender.com/scrape", {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          url: url,
-          length: length, // Sends "short", "medium", or "detailed"
-          bullets: bullets, // Sends the exact number
-        }),
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url, length, bullets }),
       });
 
       const data = await response.json();
 
       if (!response.ok) {
-        throw new Error(data.detail || "Something went wrong");
+        throw new Error(data.detail || "Unable to scrape or summarize URL.");
       }
 
-      setTitle(data.title);
-      setSummary(data.summary);
+      const articleTitle = data.title || "Research Document";
+      const articleSummary = data.summary || [];
 
-      // Add new result to the top of the history list
+      setTitle(articleTitle);
+      setSummary(articleSummary);
+
       const newItem = {
         id: Date.now(),
-        title: data.title,
+        title: articleTitle,
         url: url,
-        summary: data.summary,
+        summary: articleSummary,
+        date: new Date().toLocaleDateString("en-GB", { day: "numeric", month: "short" }).toUpperCase(),
+        category: "RESEARCH",
+        tags: ["RESEARCH", "AI"],
+        pinned: false,
       };
 
       const updatedHistory = [newItem, ...history];
       setHistory(updatedHistory);
-      localStorage.setItem(
-        "smart_read_history",
-        JSON.stringify(updatedHistory),
-      );
+      localStorage.setItem("incite_ai_history", JSON.stringify(updatedHistory));
     } catch (err) {
       setError(err.message);
     } finally {
@@ -71,7 +70,6 @@ function App() {
     }
   };
 
-  // Loads an old item back into active view
   const loadHistoryItem = (item) => {
     setUrl(item.url);
     setTitle(item.title);
@@ -79,26 +77,37 @@ function App() {
     setError("");
   };
 
-  // Clears a single item from the sidebar
-  const deleteHistoryItem = (id, e) => {
-    e.stopPropagation(); // Stop from clicking the main item container
-    const updatedHistory = history.filter((item) => item.id !== id);
-    setHistory(updatedHistory);
-    localStorage.setItem("smart_read_history", JSON.stringify(updatedHistory));
+  const togglePin = (id, e) => {
+    if (e) e.stopPropagation();
+    const updated = history.map((item) =>
+      item.id === id ? { ...item, pinned: !item.pinned } : item
+    );
+    setHistory(updated);
+    localStorage.setItem("incite_ai_history", JSON.stringify(updated));
   };
 
-  // Clears every single item from the sidebar and local cache
+  const deleteHistoryItem = (id, e) => {
+    if (e) e.stopPropagation();
+    const updated = history.filter((item) => item.id !== id);
+    setHistory(updated);
+    localStorage.setItem("incite_ai_history", JSON.stringify(updated));
+  };
+
   const clearAllHistory = () => {
-    const confirmClear = window.confirm(
-      "Are you sure you want to wipe your entire summary history? This cannot be undone.",
-    );
-    if (confirmClear) {
+    if (window.confirm("Are you sure you want to clear your research history?")) {
       setHistory([]);
+      localStorage.removeItem("incite_ai_history");
       localStorage.removeItem("smart_read_history");
     }
   };
 
-  const handleClear = () => {
+  const copyToClipboard = (textToCopy) => {
+    navigator.clipboard.writeText(textToCopy);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
+
+  const handleNewSummary = () => {
     setUrl("");
     setTitle("");
     setSummary([]);
@@ -106,260 +115,313 @@ function App() {
   };
 
   return (
-    <div className="min-h-screen bg-slate-900 text-slate-100 flex flex-col md:flex-row">
-      {/* LEFT COLUMN: History Sidebar */}
-      <aside className="w-full md:w-80 bg-slate-950 border-b md:border-b-0 md:border-r border-slate-800 p-6 flex flex-col shrink-0">
-        <div className="flex justify-between items-center mb-4">
-          <h2 className="text-xl font-bold tracking-wide text-slate-200 flex items-center gap-2">
-            <span>⏳</span> Recent Summaries
-          </h2>
-          {history.length > 0 && (
+    <div className="min-h-screen bg-[#faf9f8] text-[#1a1c1c] flex flex-col font-sans">
+      {/* TOP NAVBAR */}
+      <header className="sticky top-0 z-50 bg-[#faf9f8] border-b border-[#c2c8c0]/20">
+        <div className="flex justify-between items-center w-full px-8 py-3 mx-auto">
+          <div className="font-serif text-2xl font-bold tracking-tight text-[#1a1c1c]">Incite AI</div>
+          <nav className="hidden md:flex items-center gap-8">
+            <a className="text-sm font-semibold text-[#4a654f] border-b-2 border-[#4a654f] pb-1" href="#workspace">Discover</a>
+            <a className="text-sm font-semibold text-[#424842] hover:text-[#4a654f] transition-colors" href="#history">Library</a>
+            <a className="text-sm font-semibold text-[#424842] hover:text-[#4a654f] transition-colors" href="#analytics">Analytics</a>
+          </nav>
+          <div className="flex items-center gap-4">
+            <button className="material-symbols-outlined text-[#424842] hover:text-[#4a654f] transition-colors">settings</button>
+            <div className="w-8 h-8 rounded-full bg-[#e3e2e1] flex items-center justify-center border border-[#c2c8c0]/30">
+              <span className="material-symbols-outlined text-[20px]">account_circle</span>
+            </div>
+          </div>
+        </div>
+      </header>
+
+      {/* THREE-COLUMN LAYOUT */}
+      <div className="flex h-[calc(100vh-57px)] w-full overflow-hidden">
+        {/* LEFT SIDEBAR */}
+        <aside className="hidden lg:flex flex-col h-full py-8 px-4 w-64 bg-[#f4f3f2] border-r border-[#c2c8c0]/20 shrink-0">
+          <div className="px-3 mb-8">
+            <h2 className="font-serif text-2xl font-bold text-[#1a1c1c] mb-1">Recent Summaries</h2>
+            <p className="text-xs text-[#424842]/70">Your curated research journal</p>
+          </div>
+
+          <nav className="flex flex-col gap-1.5 flex-grow">
+            <div className="flex items-center gap-3 bg-[#b0ceb4]/30 text-[#334d38] font-semibold rounded-xl p-3 cursor-pointer">
+              <span className="material-symbols-outlined text-[20px]">home</span>
+              <span className="text-sm">Home</span>
+            </div>
+            <div className="flex items-center gap-3 text-[#424842] p-3 rounded-xl hover:bg-[#e3e2e1]/60 transition-all cursor-pointer">
+              <span className="material-symbols-outlined text-[20px]">explore</span>
+              <span className="text-sm">Discover</span>
+            </div>
+            <div className="flex items-center gap-3 text-[#424842] p-3 rounded-xl hover:bg-[#e3e2e1]/60 transition-all cursor-pointer">
+              <span className="material-symbols-outlined text-[20px]">auto_stories</span>
+              <span className="text-sm">Library</span>
+            </div>
+            <div className="flex items-center gap-3 text-[#424842] p-3 rounded-xl hover:bg-[#e3e2e1]/60 transition-all cursor-pointer">
+              <span className="material-symbols-outlined text-[20px]">insights</span>
+              <span className="text-sm">Analytics</span>
+            </div>
+          </nav>
+
+          <div className="mt-auto pt-4 border-t border-[#c2c8c0]/20 flex flex-col gap-2">
             <button
-              onClick={clearAllHistory}
-              className="text-xs font-semibold text-slate-500 hover:text-red-400 transition-colors duration-150 bg-slate-900 border border-slate-800 hover:border-red-950 px-2 py-1 rounded-md"
+              onClick={handleNewSummary}
+              className="w-full py-2.5 mb-2 rounded-lg border border-[#737972] text-[#1a1c1c] font-semibold hover:bg-[#4a654f]/10 transition-colors flex items-center justify-center gap-2 text-sm"
             >
-              Clear All
+              <span className="material-symbols-outlined text-[18px]">add</span>
+              New Summary
             </button>
-          )}
-        </div>
-        <div className="flex-1 overflow-y-auto space-y-3 pr-1 max-h-64 md:max-h-[calc(100vh-120px)]">
-          {history.length === 0 ? (
-            <p className="text-sm text-slate-500 italic mt-4 text-center">
-              No history cached yet.
-            </p>
-          ) : (
-            // Sort pinned items to the top, then sort by newest id
-            [...history]
-              .sort((a, b) => (b.pinned ? 1 : 0) - (a.pinned ? 1 : 0))
-              .map((item) => (
-                <div
-                  key={item.id}
-                  onClick={() => loadHistoryItem(item)}
-                  className={`group relative text-left w-full p-3 bg-slate-900 hover:bg-slate-800 border rounded-xl cursor-pointer transition-all duration-200 flex justify-between items-start gap-2 ${
-                    item.pinned
-                      ? "border-amber-500/40 bg-amber-950/5"
-                      : "border-slate-800 hover:border-slate-700"
-                  }`}
-                >
-                  <div className="truncate flex-1">
-                    <p className="text-sm font-semibold text-slate-300 group-hover:text-cyan-400 truncate flex items-center gap-1.5">
-                      {item.pinned && (
-                        <span className="text-amber-400 shrink-0">⭐</span>
-                      )}
-                      <span className="truncate">{item.title}</span>
-                    </p>
-                    <span className="text-xs text-slate-500 truncate block mt-0.5">
-                      {item.url}
-                    </span>
-                  </div>
+            <div className="flex items-center gap-3 text-[#424842] p-2.5 rounded-lg hover:bg-[#e3e2e1]/60 transition-all cursor-pointer">
+              <span className="material-symbols-outlined text-[20px]">history</span>
+              <span className="text-sm font-medium">History</span>
+            </div>
+            <div className="flex items-center gap-3 text-[#424842] p-2.5 rounded-lg hover:bg-[#e3e2e1]/60 transition-all cursor-pointer">
+              <span className="material-symbols-outlined text-[20px]">settings</span>
+              <span className="text-sm font-medium">Settings</span>
+            </div>
+          </div>
+        </aside>
 
-                  {/* Action Buttons: Pin & Delete */}
-                  <div className="flex items-center gap-1 shrink-0 opacity-0 group-hover:opacity-100 transition-opacity duration-150">
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation(); // Stop from opening the item
-                        const updatedHistory = history.map((h) =>
-                          h.id === item.id ? { ...h, pinned: !h.pinned } : h,
-                        );
-                        setHistory(updatedHistory);
-                        localStorage.setItem(
-                          "smart_read_history",
-                          JSON.stringify(updatedHistory),
-                        );
-                      }}
-                      className={`text-xs px-1.5 py-0.5 rounded transition-colors ${
-                        item.pinned
-                          ? "text-amber-400 hover:text-slate-400"
-                          : "text-slate-500 hover:text-amber-400"
-                      }`}
-                      title={
-                        item.pinned ? "Unpin summary" : "Pin summary to top"
-                      }
-                    >
-                      📌
-                    </button>
-                    <button
-                      onClick={(e) => deleteHistoryItem(item.id, e)}
-                      className="text-slate-500 hover:text-red-400 text-xs px-1.5 py-0.5 rounded transition-colors"
-                      title="Delete summary"
-                    >
-                      ✕
-                    </button>
-                  </div>
-                </div>
-              ))
-          )}
-        </div>
-      </aside>
-
-      {/* RIGHT COLUMN: Main Aggregator Workspace */}
-      <div className="flex-1 flex flex-col items-center p-6 lg:p-12 overflow-y-auto">
-        <header className="max-w-2xl w-full text-center my-6 md:my-12">
-          <h1 className="text-4xl font-extrabold tracking-tight sm:text-5xl bg-gradient-to-r from-cyan-400 to-blue-500 bg-clip-text text-transparent">
-            Smart Read Aggregator
-          </h1>
-          <p className="mt-3 text-base md:text-lg text-slate-400">
-            Paste any long article link below and let Gemini extract the core
-            insights in seconds.
-          </p>
-        </header>
-
-        <main className="max-w-2xl w-full bg-slate-800 p-6 rounded-2xl shadow-2xl border border-slate-700/60 backdrop-blur-sm">
-          <form onSubmit={handleScrape} className="flex flex-col gap-5">
-            {/* URL Input Bar */}
-            <div className="w-full">
-              <input
-                type="url"
-                required
-                placeholder="https://example.com/article-url"
-                value={url}
-                onChange={(e) => setUrl(e.target.value)}
-                className="w-full bg-slate-900 border border-slate-600 rounded-xl px-4 py-3 text-slate-100 placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-cyan-500 focus:border-transparent transition-all shadow-inner"
-              />
+        {/* CENTER MAIN CONTENT WORKSPACE */}
+        <main className="flex-1 overflow-y-auto bg-[#faf9f8] paper-texture relative" id="workspace">
+          <div className="max-w-[720px] mx-auto px-6 py-12">
+            {/* MAIN HEADER */}
+            <div className="text-center mb-12">
+              <h1 className="font-serif text-4xl md:text-5xl font-bold text-[#1a1c1c] mb-3">Incite AI</h1>
+              <p className="text-base text-[#424842] italic opacity-80">
+                Transform dense articles into actionable intelligence in seconds.
+              </p>
             </div>
 
-            {/* NEW: Summary Configuration Grid */}
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 bg-slate-900/40 p-4 rounded-xl border border-slate-700/50">
-              {/* Summary Length Selector */}
-              <div className="flex flex-col gap-1.5 text-left">
-                <label className="text-xs font-bold uppercase tracking-wider text-slate-400">
-                  Summary Depth
-                </label>
-                <div className="grid grid-cols-3 gap-1 bg-slate-900 p-1 rounded-lg border border-slate-700">
-                  {["short", "medium", "detailed"].map((opt) => (
-                    <button
-                      key={opt}
-                      type="button"
-                      onClick={() => setLength(opt)}
-                      className={`capitalize text-xs font-semibold py-1.5 px-2 rounded-md transition-all ${
-                        length === opt
-                          ? "bg-gradient-to-r from-cyan-500 to-blue-600 text-white shadow-md"
-                          : "text-slate-400 hover:text-slate-200"
-                      }`}
-                    >
-                      {opt}
-                    </button>
-                  ))}
-                </div>
+            {/* INPUT SCRAPER BOX */}
+            <form onSubmit={handleScrape} className="space-y-8 mb-16">
+              <div className="flex items-center gap-3 border-b border-[#1a1c1c]/20 focus-within:border-[#4a654f] pb-3 transition-colors">
+                <span className="material-symbols-outlined text-[#424842]">link</span>
+                <input
+                  className="w-full bg-transparent border-none focus:outline-none text-base placeholder:text-[#424842]/40"
+                  placeholder="Paste article URL here..."
+                  type="url"
+                  required
+                  value={url}
+                  onChange={(e) => setUrl(e.target.value)}
+                />
               </div>
 
-              {/* Bullet Point Counter Slider */}
-              <div className="flex flex-col gap-1.5 text-left">
-                <div className="flex justify-between items-center">
-                  <label className="text-xs font-bold uppercase tracking-wider text-slate-400">
-                    Bullet Points
-                  </label>
-                  <span className="text-xs font-bold text-cyan-400 bg-cyan-500/10 px-2 py-0.5 rounded border border-cyan-500/20">
-                    {bullets} Items
-                  </span>
-                </div>
-                <div className="flex items-center bg-slate-900 px-3 py-1.5 rounded-lg border border-slate-700 h-[38px]">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+                <div className="space-y-3">
+                  <div className="flex justify-between items-center">
+                    <label className="text-xs font-bold uppercase tracking-widest text-[#424842]">Summary Depth</label>
+                    <span className="text-sm font-semibold text-[#1a1c1c] capitalize">{length}</span>
+                  </div>
                   <input
+                    className="range-slider"
+                    max="2"
+                    min="0"
+                    step="1"
                     type="range"
-                    min="1"
+                    value={reverseLengthMapping[length]}
+                    onChange={(e) => setLength(lengthMapping[e.target.value])}
+                  />
+                  <div className="flex justify-between text-[10px] uppercase tracking-tighter text-[#424842]/60 font-bold">
+                    <span>Short</span>
+                    <span>Detailed</span>
+                  </div>
+                </div>
+
+                <div className="space-y-3">
+                  <div className="flex justify-between items-center">
+                    <label className="text-xs font-bold uppercase tracking-widest text-[#424842]">Bullet Points</label>
+                    <span className="text-sm font-semibold text-[#1a1c1c]">{bullets}</span>
+                  </div>
+                  <input
+                    className="range-slider"
                     max="7"
+                    min="1"
+                    step="1"
+                    type="range"
                     value={bullets}
                     onChange={(e) => setBullets(parseInt(e.target.value))}
-                    className="w-full accent-cyan-500 cursor-pointer"
                   />
+                  <div className="flex justify-between text-[10px] uppercase tracking-tighter text-[#424842]/60 font-bold">
+                    <span>1</span>
+                    <span>7</span>
+                  </div>
                 </div>
               </div>
-            </div>
 
-            {/* Action Buttons Row */}
-            <div className="flex flex-col sm:flex-row gap-3 w-full">
               <button
                 type="submit"
                 disabled={loading}
-                className="flex-1 bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-600 hover:to-blue-700 font-semibold py-3 rounded-xl shadow-lg shadow-cyan-500/20 active:scale-95 transition-all text-white disabled:opacity-50"
+                className="w-full py-3.5 border border-[#1a1c1c] text-[#1a1c1c] font-semibold flex items-center justify-center gap-2 hover:bg-[#1a1c1c] hover:text-[#faf9f8] transition-all duration-300 disabled:opacity-50"
               >
-                {loading ? "Analyzing..." : "Summarize"}
+                <span className={`material-symbols-outlined text-[20px] ${loading ? "animate-spin" : ""}`}>
+                  {loading ? "progress_activity" : "auto_awesome"}
+                </span>
+                <span>{loading ? "Analyzing Source..." : "Generate Insight"}</span>
               </button>
+            </form>
 
-              {(url || title || summary.length > 0) && (
-                <button
-                  type="button"
-                  onClick={handleClear}
-                  className="bg-slate-700 hover:bg-slate-600 border border-slate-600 text-slate-200 font-medium px-5 py-3 rounded-xl active:scale-95 transition-all shadow-md"
-                >
-                  Clear Fields
-                </button>
-              )}
-            </div>
-          </form>
+            {/* ERROR DISPLAY */}
+            {error && (
+              <div className="mb-8 p-4 bg-[#ffdad6] text-[#93000a] rounded-lg text-sm border border-[#ba1a1a]/20">
+                ⚠️ {error}
+              </div>
+            )}
 
-          {error && (
-            <div className="mt-5 p-4 bg-red-950/40 border border-red-500/30 rounded-xl text-red-200 text-sm">
-              ⚠️ {error}
-            </div>
-          )}
+            {/* ACTIVE RESULT CARD */}
+            {!loading && (title || summary.length > 0) && (
+              <div className="bg-[#f4f3f2] border border-[#c2c8c0]/30 p-6 mb-12 shadow-sm rounded-lg space-y-4">
+                <div className="flex justify-between items-start">
+                  <div>
+                    <span className="text-[10px] uppercase tracking-[0.2em] text-[#4a654f] font-bold mb-1 block">
+                      ACTIVE RESULT
+                    </span>
+                    <h3 className="font-serif text-2xl font-bold leading-snug text-[#1a1c1c]">{title}</h3>
+                  </div>
+                  <button
+                    onClick={() => copyToClipboard(`### ${title}\n\n${summary.map((b) => `* ${b}`).join("\n")}`)}
+                    className="flex items-center gap-1.5 text-xs font-semibold text-[#424842] hover:text-[#4a654f] transition-colors"
+                  >
+                    <span className="material-symbols-outlined text-[16px]">{copied ? "check" : "content_copy"}</span>
+                    <span>{copied ? "Copied" : "Copy Summary"}</span>
+                  </button>
+                </div>
 
-          {loading && (
-            <div className="mt-8 border-t border-slate-700/60 pt-6 space-y-4 animate-pulse">
-              <div className="h-6 bg-slate-700 rounded-md w-3/4 mb-6"></div>
-              <div className="h-16 bg-slate-700/50 rounded-xl w-full"></div>
-              <div className="h-16 bg-slate-700/50 rounded-xl w-full"></div>
-              <div className="h-16 bg-slate-700/50 rounded-xl w-full"></div>
-            </div>
-          )}
+                <div className="space-y-3 pt-2">
+                  {summary.map((point, idx) => (
+                    <div key={idx} className="flex gap-3 text-sm text-[#424842]">
+                      <span className="text-[#4a654f] font-bold">{(idx + 1).toString().padStart(2, "0")}.</span>
+                      <p className="leading-relaxed">{point}</p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
 
-          {/* AI Results Display */}
-          {!loading && (title || summary.length > 0) && (
-            <div className="mt-8 border-t border-slate-700/60 pt-6">
-              {/* Title block with Copy to Clipboard Action */}
-              <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-4 mb-5">
-                <h2 className="text-xl font-bold text-slate-100 flex-1 leading-snug text-left">
-                  {title}
-                </h2>
-                <button
-                  type="button"
-                  disabled={copied}
-                  onClick={() => {
-                    const markdownText = `### ${title}\n\n${summary.map((bullet) => `* ${bullet}`).join("\n")}`;
-                    navigator.clipboard.writeText(markdownText);
-
-                    // Switch state to true, then revert back after 1 seconds
-                    setCopied(true);
-                    setTimeout(() => setCopied(false), 1000);
-                  }}
-                  className={`shrink-0 text-xs font-semibold border px-3 py-2 rounded-xl transition-all active:scale-95 flex items-center gap-1.5 self-start ${
-                    copied
-                      ? "bg-emerald-950/40 border-emerald-500/40 text-emerald-400"
-                      : "bg-slate-900 border-slate-700 hover:border-slate-600 text-cyan-400 hover:text-cyan-300"
-                  }`}
-                >
-                  {copied ? (
-                    <>
-                      <span>✅</span> Copied!
-                    </>
-                  ) : (
-                    <>
-                      <span>📋</span> Copy
-                    </>
-                  )}
-                </button>
+            {/* HISTORY SECTION */}
+            <div className="space-y-6" id="history">
+              <div className="flex justify-between items-end border-b border-[#c2c8c0]/20 pb-3">
+                <h3 className="font-serif text-2xl font-bold text-[#1a1c1c]">History</h3>
+                {history.length > 0 && (
+                  <div className="flex gap-4 text-xs font-semibold uppercase tracking-widest text-[#424842]/60">
+                    <button onClick={clearAllHistory} className="hover:text-[#ba1a1a] transition-colors">Clear All</button>
+                  </div>
+                )}
               </div>
 
-              <ul className="space-y-4 text-left">
-                {summary.map((bullet, index) => (
-                  <li
-                    key={index}
-                    className="flex items-start gap-3 text-slate-300 bg-slate-900/40 p-4 rounded-xl border border-slate-700/40"
-                  >
-                    <span className="text-cyan-400 mt-1 select-none">✦</span>
-                    <span className="leading-relaxed">{bullet}</span>
-                  </li>
-                ))}
-              </ul>
-            </div>
-          )}
+              <div className="space-y-6">
+                {history.length === 0 ? (
+                  <div className="text-center py-12 text-[#424842]/40 italic text-sm">
+                    Your summarized research will appear here.
+                  </div>
+                ) : (
+                  [...history]
+                    .sort((a, b) => (b.pinned ? 1 : 0) - (a.pinned ? 1 : 0))
+                    .map((item) => (
+                      <div
+                        key={item.id}
+                        onClick={() => loadHistoryItem(item)}
+                        className={`bg-[#f4f3f2] border ${
+                          item.pinned ? "border-[#4a654f]" : "border-[#c2c8c0]/20"
+                        } p-6 hover:border-[#4a654f]/40 transition-all cursor-pointer relative group rounded-sm`}
+                      >
+                        <div className="flex justify-between items-start mb-3">
+                          <div>
+                            <span className="text-[10px] uppercase tracking-[0.2em] text-[#4a654f] font-bold mb-1 block">
+                              {item.category || "RESEARCH"} • {item.date || "TODAY"}
+                            </span>
+                            <h4 className="font-serif text-xl font-bold leading-snug text-[#1a1c1c]">{item.title}</h4>
+                          </div>
+                          <div className="flex gap-2">
+                            <button
+                              onClick={(e) => togglePin(item.id, e)}
+                              className={`material-symbols-outlined text-[20px] transition-colors ${
+                                item.pinned ? "text-[#4a654f]" : "text-[#424842]/30 group-hover:text-[#4a654f]"
+                              }`}
+                            >
+                              push_pin
+                            </button>
+                            <button
+                              onClick={(e) => deleteHistoryItem(item.id, e)}
+                              className="material-symbols-outlined text-[20px] text-[#424842]/30 hover:text-[#ba1a1a] transition-colors"
+                            >
+                              delete
+                            </button>
+                          </div>
+                        </div>
 
-          {!loading && !title && !error && (
-            <div className="mt-8 border-t border-slate-700/60 pt-6 text-center text-slate-500 text-sm">
-              Your summaries will appear here.
+                        <div className="space-y-2.5 mb-6">
+                          {item.summary &&
+                            item.summary.map((point, idx) => (
+                              <div key={idx} className="flex gap-3 text-sm text-[#424842]">
+                                <span className="text-[#4a654f] font-bold">{(idx + 1).toString().padStart(2, "0")}.</span>
+                                <p className="leading-relaxed line-clamp-2">{point}</p>
+                              </div>
+                            ))}
+                        </div>
+
+                        <div className="flex justify-between items-center pt-2">
+                          <div className="flex gap-2">
+                            <span className="bg-[#cceacf]/40 text-[#253f2b] px-2.5 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider">
+                              RESEARCH
+                            </span>
+                            <span className="bg-[#e3e2e1]/50 text-[#424842] px-2.5 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider">
+                              AI
+                            </span>
+                          </div>
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              copyToClipboard(`### ${item.title}\n\n${item.summary.map((b) => `* ${b}`).join("\n")}`);
+                            }}
+                            className="flex items-center gap-1 text-xs font-semibold text-[#424842] hover:text-[#4a654f] transition-colors"
+                          >
+                            <span className="material-symbols-outlined text-[16px]">content_copy</span>
+                            <span>Copy Summary</span>
+                          </button>
+                        </div>
+                      </div>
+                    ))
+                )}
+              </div>
             </div>
-          )}
+          </div>
         </main>
+
+        {/* RIGHT INSIGHTS SIDEBAR */}
+        <aside className="hidden xl:flex flex-col w-80 bg-[#e9e8e7]/30 border-l border-[#c2c8c0]/20 p-6 overflow-y-auto shrink-0">
+          <h5 className="text-[11px] font-bold uppercase tracking-[0.2em] text-[#424842]/60 mb-6">Reading Insights</h5>
+          <div className="space-y-8">
+            <div className="p-4 bg-[#faf9f8] rounded-lg border border-[#c2c8c0]/20 shadow-sm">
+              <p className="text-[10px] font-bold text-[#4a654f] uppercase mb-1.5 tracking-wider">Trend Detection</p>
+              <p className="text-sm text-[#1a1c1c] leading-snug">
+                Increased focus on <strong className="font-bold">Computational Ethics</strong> in your last {history.length > 0 ? history.length : 5} summaries.
+              </p>
+            </div>
+
+            <div>
+              <h6 className="text-xs font-semibold text-[#1a1c1c] mb-3">Topics Cloud</h6>
+              <div className="flex flex-wrap gap-2">
+                <span className="text-[11px] text-[#424842] px-3 py-1 bg-[#faf9f8] border border-[#c2c8c0]/40 rounded-full">AI Ethics</span>
+                <span className="text-[11px] text-[#1a1c1c] px-3 py-1 bg-[#faf9f8] border border-[#1a1c1c]/40 rounded-full font-medium">Neuroscience</span>
+                <span className="text-[11px] text-[#424842] px-3 py-1 bg-[#faf9f8] border border-[#c2c8c0]/40 rounded-full">SaaS</span>
+                <span className="text-[11px] text-[#424842] px-3 py-1 bg-[#faf9f8] border border-[#c2c8c0]/40 rounded-full">History</span>
+                <span className="text-[11px] text-[#424842] px-3 py-1 bg-[#faf9f8] border border-[#c2c8c0]/40 rounded-full">Biology</span>
+              </div>
+            </div>
+
+            <div className="relative overflow-hidden aspect-[3/4] bg-[#e3e2e1] rounded-lg group shadow-sm">
+              <img
+                alt="Deep Focus Journal"
+                className="object-cover w-full h-full grayscale opacity-80 group-hover:grayscale-0 group-hover:opacity-100 transition-all duration-700"
+                src="https://images.unsplash.com/photo-1544716278-ca5e3f4abd8c?auto=format&fit=crop&q=80&w=600"
+              />
+              <div className="absolute bottom-0 left-0 right-0 p-4 bg-gradient-to-t from-[#faf9f8]/95 via-[#faf9f8]/70 to-transparent">
+                <p className="font-serif text-lg font-bold text-[#1a1c1c]">Deep Focus Month</p>
+                <p className="text-[10px] uppercase tracking-widest text-[#424842] font-semibold">{history.length} Articles Analyzed</p>
+              </div>
+            </div>
+          </div>
+        </aside>
       </div>
     </div>
   );

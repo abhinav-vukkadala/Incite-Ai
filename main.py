@@ -10,9 +10,40 @@ from pydantic import BaseModel
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
+from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker
+from datetime import datetime
 
 load_dotenv()
 
+# Database setup
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:YOUR_PASSWORD@localhost:5432/inciteai")
+
+engine = create_engine(DATABASE_URL)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
+
+# Summary model
+class Summary(Base):
+    __tablename__ = "summaries"
+    id = Column(Integer, primary_key=True, index=True)
+    user_email = Column(String, nullable=False)
+    title = Column(String, nullable=False)
+    url = Column(String, nullable=False)
+    summary = Column(Text, nullable=False)
+    length = Column(String, nullable=False)
+    bullets = Column(Integer, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+# Dependency to get DB session
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+        
 app = FastAPI()
 
 limiter = Limiter(key_func=get_remote_address)
