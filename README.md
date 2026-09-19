@@ -1,7 +1,7 @@
 # SmartRead
 AI-powered content aggregator that summarizes any article in seconds.
 
-🔗 Live Demo: https://smart-read.vercel.app
+🔗 Live Demo: https://incite-ai.vercel.app
 
 ## What it does
 Paste any article URL and get back AI-generated bullet points with configurable depth and count.
