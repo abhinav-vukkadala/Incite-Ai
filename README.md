@@ -1,4 +1,4 @@
-# SmartRead
+# Incite-Ai
 AI-powered content aggregator that summarizes any article in seconds.
 
 🔗 Live Demo: https://incite-ai.vercel.app
