@@ -14,14 +14,14 @@ function App() {
 
   // Load history on initial mount
   useEffect(() => {
-    const saved = localStorage.getItem("incite_ai_history") || localStorage.getItem("smart_read_history");
+    const saved = localStorage.getItem("incite_ai_history");
     if (saved) {
       setHistory(JSON.parse(saved));
     }
   }, []);
 
   const lengthMapping = { 0: "short", 1: "medium", 2: "detailed" };
-  const reverseLengthMapping = { "short": 0, "medium": 1, "detailed": 2 };
+  const reverseLengthMapping = { short: 0, medium: 1, detailed: 2 };
 
   const handleScrape = async (e) => {
     if (e) e.preventDefault();
@@ -31,7 +31,7 @@ function App() {
     setError("");
 
     try {
-      const response = await fetch("https://smart-read-backend.onrender.com/scrape", {
+      const response = await fetch("http://localhost:8000/scrape", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ url, length, bullets }),
@@ -54,7 +54,9 @@ function App() {
         title: articleTitle,
         url: url,
         summary: articleSummary,
-        date: new Date().toLocaleDateString("en-GB", { day: "numeric", month: "short" }).toUpperCase(),
+        date: new Date()
+          .toLocaleDateString("en-GB", { day: "numeric", month: "short" })
+          .toUpperCase(),
         category: "RESEARCH",
         tags: ["RESEARCH", "AI"],
         pinned: false,
@@ -80,7 +82,7 @@ function App() {
   const togglePin = (id, e) => {
     if (e) e.stopPropagation();
     const updated = history.map((item) =>
-      item.id === id ? { ...item, pinned: !item.pinned } : item
+      item.id === id ? { ...item, pinned: !item.pinned } : item,
     );
     setHistory(updated);
     localStorage.setItem("incite_ai_history", JSON.stringify(updated));
@@ -94,7 +96,9 @@ function App() {
   };
 
   const clearAllHistory = () => {
-    if (window.confirm("Are you sure you want to clear your research history?")) {
+    if (
+      window.confirm("Are you sure you want to clear your research history?")
+    ) {
       setHistory([]);
       localStorage.removeItem("incite_ai_history");
       localStorage.removeItem("smart_read_history");
@@ -119,16 +123,37 @@ function App() {
       {/* TOP NAVBAR */}
       <header className="sticky top-0 z-50 bg-[#faf9f8] border-b border-[#c2c8c0]/20">
         <div className="flex justify-between items-center w-full px-8 py-3 mx-auto">
-          <div className="font-serif text-2xl font-bold tracking-tight text-[#1a1c1c]">Incite AI</div>
+          <div className="font-serif text-2xl font-bold tracking-tight text-[#1a1c1c]">
+            Incite AI
+          </div>
           <nav className="hidden md:flex items-center gap-8">
-            <a className="text-sm font-semibold text-[#4a654f] border-b-2 border-[#4a654f] pb-1" href="#workspace">Discover</a>
-            <a className="text-sm font-semibold text-[#424842] hover:text-[#4a654f] transition-colors" href="#history">Library</a>
-            <a className="text-sm font-semibold text-[#424842] hover:text-[#4a654f] transition-colors" href="#analytics">Analytics</a>
+            <a
+              className="text-sm font-semibold text-[#4a654f] border-b-2 border-[#4a654f] pb-1"
+              href="#workspace"
+            >
+              Discover
+            </a>
+            <a
+              className="text-sm font-semibold text-[#424842] hover:text-[#4a654f] transition-colors"
+              href="#history"
+            >
+              Library
+            </a>
+            <a
+              className="text-sm font-semibold text-[#424842] hover:text-[#4a654f] transition-colors"
+              href="#analytics"
+            >
+              Analytics
+            </a>
           </nav>
           <div className="flex items-center gap-4">
-            <button className="material-symbols-outlined text-[#424842] hover:text-[#4a654f] transition-colors">settings</button>
+            <button className="material-symbols-outlined text-[#424842] hover:text-[#4a654f] transition-colors">
+              settings
+            </button>
             <div className="w-8 h-8 rounded-full bg-[#e3e2e1] flex items-center justify-center border border-[#c2c8c0]/30">
-              <span className="material-symbols-outlined text-[20px]">account_circle</span>
+              <span className="material-symbols-outlined text-[20px]">
+                account_circle
+              </span>
             </div>
           </div>
         </div>
@@ -139,25 +164,37 @@ function App() {
         {/* LEFT SIDEBAR */}
         <aside className="hidden lg:flex flex-col h-full py-8 px-4 w-64 bg-[#f4f3f2] border-r border-[#c2c8c0]/20 shrink-0">
           <div className="px-3 mb-8">
-            <h2 className="font-serif text-2xl font-bold text-[#1a1c1c] mb-1">Recent Summaries</h2>
-            <p className="text-xs text-[#424842]/70">Your curated research journal</p>
+            <h2 className="font-serif text-2xl font-bold text-[#1a1c1c] mb-1">
+              Recent Summaries
+            </h2>
+            <p className="text-xs text-[#424842]/70">
+              Your curated research journal
+            </p>
           </div>
 
           <nav className="flex flex-col gap-1.5 flex-grow">
             <div className="flex items-center gap-3 bg-[#b0ceb4]/30 text-[#334d38] font-semibold rounded-xl p-3 cursor-pointer">
-              <span className="material-symbols-outlined text-[20px]">home</span>
+              <span className="material-symbols-outlined text-[20px]">
+                home
+              </span>
               <span className="text-sm">Home</span>
             </div>
             <div className="flex items-center gap-3 text-[#424842] p-3 rounded-xl hover:bg-[#e3e2e1]/60 transition-all cursor-pointer">
-              <span className="material-symbols-outlined text-[20px]">explore</span>
+              <span className="material-symbols-outlined text-[20px]">
+                explore
+              </span>
               <span className="text-sm">Discover</span>
             </div>
             <div className="flex items-center gap-3 text-[#424842] p-3 rounded-xl hover:bg-[#e3e2e1]/60 transition-all cursor-pointer">
-              <span className="material-symbols-outlined text-[20px]">auto_stories</span>
+              <span className="material-symbols-outlined text-[20px]">
+                auto_stories
+              </span>
               <span className="text-sm">Library</span>
             </div>
             <div className="flex items-center gap-3 text-[#424842] p-3 rounded-xl hover:bg-[#e3e2e1]/60 transition-all cursor-pointer">
-              <span className="material-symbols-outlined text-[20px]">insights</span>
+              <span className="material-symbols-outlined text-[20px]">
+                insights
+              </span>
               <span className="text-sm">Analytics</span>
             </div>
           </nav>
@@ -171,32 +208,46 @@ function App() {
               New Summary
             </button>
             <div className="flex items-center gap-3 text-[#424842] p-2.5 rounded-lg hover:bg-[#e3e2e1]/60 transition-all cursor-pointer">
-              <span className="material-symbols-outlined text-[20px]">history</span>
+              <span className="material-symbols-outlined text-[20px]">
+                history
+              </span>
               <span className="text-sm font-medium">History</span>
             </div>
             <div className="flex items-center gap-3 text-[#424842] p-2.5 rounded-lg hover:bg-[#e3e2e1]/60 transition-all cursor-pointer">
-              <span className="material-symbols-outlined text-[20px]">settings</span>
+              <span className="material-symbols-outlined text-[20px]">
+                settings
+              </span>
               <span className="text-sm font-medium">Settings</span>
             </div>
           </div>
         </aside>
 
         {/* CENTER MAIN CONTENT WORKSPACE */}
-        <main className="flex-1 overflow-y-auto bg-[#faf9f8] paper-texture relative" id="workspace">
+        <main
+          className="flex-1 overflow-y-auto bg-[#faf9f8] paper-texture relative"
+          id="workspace"
+        >
           <div className="max-w-[720px] mx-auto px-6 py-12">
             {/* MAIN HEADER */}
             <div className="text-center mb-12">
-              <h1 className="font-serif text-4xl md:text-5xl font-bold text-[#1a1c1c] mb-3">Incite AI</h1>
+              <h1 className="font-serif text-4xl md:text-5xl font-bold text-[#1a1c1c] mb-3">
+                Incite AI
+              </h1>
               <p className="text-base text-[#424842] italic opacity-80">
-                Transform dense articles into actionable intelligence in seconds.
+                Transform dense articles into actionable intelligence in
+                seconds.
               </p>
             </div>
 
             {/* INPUT SCRAPER BOX */}
             <form onSubmit={handleScrape} className="space-y-8 mb-16">
               <div className="flex items-center gap-3 border-b border-[#1a1c1c]/20 focus-within:border-[#4a654f] pb-3 transition-colors">
-                <span className="material-symbols-outlined text-[#424842]">link</span>
+                <span className="material-symbols-outlined text-[#424842]">
+                  link
+                </span>
                 <input
+                  id="url-input"
+                  aria-label="paste article url here"
                   className="w-full bg-transparent border-none focus:outline-none text-base placeholder:text-[#424842]/40"
                   placeholder="Paste article URL here..."
                   type="url"
@@ -209,10 +260,18 @@ function App() {
               <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
                 <div className="space-y-3">
                   <div className="flex justify-between items-center">
-                    <label className="text-xs font-bold uppercase tracking-widest text-[#424842]">Summary Depth</label>
-                    <span className="text-sm font-semibold text-[#1a1c1c] capitalize">{length}</span>
+                    <label
+                      htmlFor="summary-depth"
+                      className="text-xs font-bold uppercase tracking-widest text-[#424842]"
+                    >
+                      Summary Depth
+                    </label>
+                    <span className="text-sm font-semibold text-[#1a1c1c] capitalize">
+                      {length}
+                    </span>
                   </div>
                   <input
+                    id="summary-depth"
                     className="range-slider"
                     max="2"
                     min="0"
@@ -229,10 +288,18 @@ function App() {
 
                 <div className="space-y-3">
                   <div className="flex justify-between items-center">
-                    <label className="text-xs font-bold uppercase tracking-widest text-[#424842]">Bullet Points</label>
-                    <span className="text-sm font-semibold text-[#1a1c1c]">{bullets}</span>
+                    <label
+                      htmlFor="bullet-points"
+                      className="text-xs font-bold uppercase tracking-widest text-[#424842]"
+                    >
+                      Bullet Points
+                    </label>
+                    <span className="text-sm font-semibold text-[#1a1c1c]">
+                      {bullets}
+                    </span>
                   </div>
                   <input
+                    id="bullet-points"
                     className="range-slider"
                     max="7"
                     min="1"
@@ -253,10 +320,14 @@ function App() {
                 disabled={loading}
                 className="w-full py-3.5 border border-[#1a1c1c] text-[#1a1c1c] font-semibold flex items-center justify-center gap-2 hover:bg-[#1a1c1c] hover:text-[#faf9f8] transition-all duration-300 disabled:opacity-50"
               >
-                <span className={`material-symbols-outlined text-[20px] ${loading ? "animate-spin" : ""}`}>
+                <span
+                  className={`material-symbols-outlined text-[20px] ${loading ? "animate-spin" : ""}`}
+                >
                   {loading ? "progress_activity" : "auto_awesome"}
                 </span>
-                <span>{loading ? "Analyzing Source..." : "Generate Insight"}</span>
+                <span>
+                  {loading ? "Analyzing Source..." : "Generate Insight"}
+                </span>
               </button>
             </form>
 
@@ -275,21 +346,34 @@ function App() {
                     <span className="text-[10px] uppercase tracking-[0.2em] text-[#4a654f] font-bold mb-1 block">
                       ACTIVE RESULT
                     </span>
-                    <h3 className="font-serif text-2xl font-bold leading-snug text-[#1a1c1c]">{title}</h3>
+                    <h3 className="font-serif text-2xl font-bold leading-snug text-[#1a1c1c]">
+                      {title}
+                    </h3>
                   </div>
                   <button
-                    onClick={() => copyToClipboard(`### ${title}\n\n${summary.map((b) => `* ${b}`).join("\n")}`)}
+                    onClick={() =>
+                      copyToClipboard(
+                        `### ${title}\n\n${summary.map((b) => `* ${b}`).join("\n")}`,
+                      )
+                    }
                     className="flex items-center gap-1.5 text-xs font-semibold text-[#424842] hover:text-[#4a654f] transition-colors"
                   >
-                    <span className="material-symbols-outlined text-[16px]">{copied ? "check" : "content_copy"}</span>
+                    <span className="material-symbols-outlined text-[16px]">
+                      {copied ? "check" : "content_copy"}
+                    </span>
                     <span>{copied ? "Copied" : "Copy Summary"}</span>
                   </button>
                 </div>
 
                 <div className="space-y-3 pt-2">
                   {summary.map((point, idx) => (
-                    <div key={idx} className="flex gap-3 text-sm text-[#424842]">
-                      <span className="text-[#4a654f] font-bold">{(idx + 1).toString().padStart(2, "0")}.</span>
+                    <div
+                      key={idx}
+                      className="flex gap-3 text-sm text-[#424842]"
+                    >
+                      <span className="text-[#4a654f] font-bold">
+                        {(idx + 1).toString().padStart(2, "0")}.
+                      </span>
                       <p className="leading-relaxed">{point}</p>
                     </div>
                   ))}
@@ -300,10 +384,17 @@ function App() {
             {/* HISTORY SECTION */}
             <div className="space-y-6" id="history">
               <div className="flex justify-between items-end border-b border-[#c2c8c0]/20 pb-3">
-                <h3 className="font-serif text-2xl font-bold text-[#1a1c1c]">History</h3>
+                <h3 className="font-serif text-2xl font-bold text-[#1a1c1c]">
+                  History
+                </h3>
                 {history.length > 0 && (
                   <div className="flex gap-4 text-xs font-semibold uppercase tracking-widest text-[#424842]/60">
-                    <button onClick={clearAllHistory} className="hover:text-[#ba1a1a] transition-colors">Clear All</button>
+                    <button
+                      onClick={clearAllHistory}
+                      className="hover:text-[#ba1a1a] transition-colors"
+                    >
+                      Clear All
+                    </button>
                   </div>
                 )}
               </div>
@@ -321,21 +412,28 @@ function App() {
                         key={item.id}
                         onClick={() => loadHistoryItem(item)}
                         className={`bg-[#f4f3f2] border ${
-                          item.pinned ? "border-[#4a654f]" : "border-[#c2c8c0]/20"
+                          item.pinned
+                            ? "border-[#4a654f]"
+                            : "border-[#c2c8c0]/20"
                         } p-6 hover:border-[#4a654f]/40 transition-all cursor-pointer relative group rounded-sm`}
                       >
                         <div className="flex justify-between items-start mb-3">
                           <div>
                             <span className="text-[10px] uppercase tracking-[0.2em] text-[#4a654f] font-bold mb-1 block">
-                              {item.category || "RESEARCH"} • {item.date || "TODAY"}
+                              {item.category || "RESEARCH"} •{" "}
+                              {item.date || "TODAY"}
                             </span>
-                            <h4 className="font-serif text-xl font-bold leading-snug text-[#1a1c1c]">{item.title}</h4>
+                            <h4 className="font-serif text-xl font-bold leading-snug text-[#1a1c1c]">
+                              {item.title}
+                            </h4>
                           </div>
                           <div className="flex gap-2">
                             <button
                               onClick={(e) => togglePin(item.id, e)}
                               className={`material-symbols-outlined text-[20px] transition-colors ${
-                                item.pinned ? "text-[#4a654f]" : "text-[#424842]/30 group-hover:text-[#4a654f]"
+                                item.pinned
+                                  ? "text-[#4a654f]"
+                                  : "text-[#424842]/30 group-hover:text-[#4a654f]"
                               }`}
                             >
                               push_pin
@@ -352,9 +450,16 @@ function App() {
                         <div className="space-y-2.5 mb-6">
                           {item.summary &&
                             item.summary.map((point, idx) => (
-                              <div key={idx} className="flex gap-3 text-sm text-[#424842]">
-                                <span className="text-[#4a654f] font-bold">{(idx + 1).toString().padStart(2, "0")}.</span>
-                                <p className="leading-relaxed line-clamp-2">{point}</p>
+                              <div
+                                key={idx}
+                                className="flex gap-3 text-sm text-[#424842]"
+                              >
+                                <span className="text-[#4a654f] font-bold">
+                                  {(idx + 1).toString().padStart(2, "0")}.
+                                </span>
+                                <p className="leading-relaxed line-clamp-2">
+                                  {point}
+                                </p>
                               </div>
                             ))}
                         </div>
@@ -371,11 +476,15 @@ function App() {
                           <button
                             onClick={(e) => {
                               e.stopPropagation();
-                              copyToClipboard(`### ${item.title}\n\n${item.summary.map((b) => `* ${b}`).join("\n")}`);
+                              copyToClipboard(
+                                `### ${item.title}\n\n${item.summary.map((b) => `* ${b}`).join("\n")}`,
+                              );
                             }}
                             className="flex items-center gap-1 text-xs font-semibold text-[#424842] hover:text-[#4a654f] transition-colors"
                           >
-                            <span className="material-symbols-outlined text-[16px]">content_copy</span>
+                            <span className="material-symbols-outlined text-[16px]">
+                              content_copy
+                            </span>
                             <span>Copy Summary</span>
                           </button>
                         </div>
@@ -389,23 +498,41 @@ function App() {
 
         {/* RIGHT INSIGHTS SIDEBAR */}
         <aside className="hidden xl:flex flex-col w-80 bg-[#e9e8e7]/30 border-l border-[#c2c8c0]/20 p-6 overflow-y-auto shrink-0">
-          <h5 className="text-[11px] font-bold uppercase tracking-[0.2em] text-[#424842]/60 mb-6">Reading Insights</h5>
+          <h5 className="text-[11px] font-bold uppercase tracking-[0.2em] text-[#424842]/60 mb-6">
+            Reading Insights
+          </h5>
           <div className="space-y-8">
             <div className="p-4 bg-[#faf9f8] rounded-lg border border-[#c2c8c0]/20 shadow-sm">
-              <p className="text-[10px] font-bold text-[#4a654f] uppercase mb-1.5 tracking-wider">Trend Detection</p>
+              <p className="text-[10px] font-bold text-[#4a654f] uppercase mb-1.5 tracking-wider">
+                Trend Detection
+              </p>
               <p className="text-sm text-[#1a1c1c] leading-snug">
-                Increased focus on <strong className="font-bold">Computational Ethics</strong> in your last {history.length > 0 ? history.length : 5} summaries.
+                Increased focus on{" "}
+                <strong className="font-bold">Computational Ethics</strong> in
+                your last {history.length > 0 ? history.length : 5} summaries.
               </p>
             </div>
 
             <div>
-              <h6 className="text-xs font-semibold text-[#1a1c1c] mb-3">Topics Cloud</h6>
+              <h6 className="text-xs font-semibold text-[#1a1c1c] mb-3">
+                Topics Cloud
+              </h6>
               <div className="flex flex-wrap gap-2">
-                <span className="text-[11px] text-[#424842] px-3 py-1 bg-[#faf9f8] border border-[#c2c8c0]/40 rounded-full">AI Ethics</span>
-                <span className="text-[11px] text-[#1a1c1c] px-3 py-1 bg-[#faf9f8] border border-[#1a1c1c]/40 rounded-full font-medium">Neuroscience</span>
-                <span className="text-[11px] text-[#424842] px-3 py-1 bg-[#faf9f8] border border-[#c2c8c0]/40 rounded-full">SaaS</span>
-                <span className="text-[11px] text-[#424842] px-3 py-1 bg-[#faf9f8] border border-[#c2c8c0]/40 rounded-full">History</span>
-                <span className="text-[11px] text-[#424842] px-3 py-1 bg-[#faf9f8] border border-[#c2c8c0]/40 rounded-full">Biology</span>
+                <span className="text-[11px] text-[#424842] px-3 py-1 bg-[#faf9f8] border border-[#c2c8c0]/40 rounded-full">
+                  AI Ethics
+                </span>
+                <span className="text-[11px] text-[#1a1c1c] px-3 py-1 bg-[#faf9f8] border border-[#1a1c1c]/40 rounded-full font-medium">
+                  Neuroscience
+                </span>
+                <span className="text-[11px] text-[#424842] px-3 py-1 bg-[#faf9f8] border border-[#c2c8c0]/40 rounded-full">
+                  SaaS
+                </span>
+                <span className="text-[11px] text-[#424842] px-3 py-1 bg-[#faf9f8] border border-[#c2c8c0]/40 rounded-full">
+                  History
+                </span>
+                <span className="text-[11px] text-[#424842] px-3 py-1 bg-[#faf9f8] border border-[#c2c8c0]/40 rounded-full">
+                  Biology
+                </span>
               </div>
             </div>
 
@@ -416,8 +543,12 @@ function App() {
                 src="https://images.unsplash.com/photo-1544716278-ca5e3f4abd8c?auto=format&fit=crop&q=80&w=600"
               />
               <div className="absolute bottom-0 left-0 right-0 p-4 bg-gradient-to-t from-[#faf9f8]/95 via-[#faf9f8]/70 to-transparent">
-                <p className="font-serif text-lg font-bold text-[#1a1c1c]">Deep Focus Month</p>
-                <p className="text-[10px] uppercase tracking-widest text-[#424842] font-semibold">{history.length} Articles Analyzed</p>
+                <p className="font-serif text-lg font-bold text-[#1a1c1c]">
+                  Deep Focus Month
+                </p>
+                <p className="text-[10px] uppercase tracking-widest text-[#424842] font-semibold">
+                  {history.length} Articles Analyzed
+                </p>
               </div>
             </div>
           </div>
