@@ -49,19 +49,19 @@
   --color-secondary: #5f5e5e;
   --color-on-tertiary-container: #3a3937;
 
-  --font-headline: 'Playfair Display', serif;
-  --font-body: 'Inter', sans-serif;
+  --font-headline: "Playfair Display", serif;
+  --font-body: "Inter", sans-serif;
 }
 
 body {
   background-color: #faf9f8;
   color: #1a1c1c;
-  font-family: 'Inter', sans-serif;
+  font-family: "Inter", sans-serif;
   -webkit-font-smoothing: antialiased;
 }
 
 .material-symbols-outlined {
-  font-family: 'Material Symbols Outlined';
+  font-family: "Material Symbols Outlined";
   font-weight: normal;
   font-style: normal;
   font-size: 24px;
