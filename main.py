@@ -42,10 +42,14 @@ class Summary(Base):
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
 
-# Create tables during application startup
+# Create tables safely during application startup
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    Base.metadata.create_all(bind=engine)
+    try:
+        Base.metadata.create_all(bind=engine)
+        print("Connected to PostgreSQL and tables verified.")
+    except Exception as e:
+        print(f"Warning: Database startup check failed: {e}")
     yield
 
 
@@ -225,6 +229,24 @@ def scrape_endpoint(
         "url": target_url,
         "summary": summary_bullets,
     }
+
+
+@app.get("/history")
+def get_history(limit: int = 10, db: Session = Depends(get_db)):
+    """Fetch recent summaries stored in the PostgreSQL database."""
+    summaries = db.query(Summary).order_by(Summary.created_at.desc()).limit(limit).all()
+    return [
+        {
+            "id": s.id,
+            "title": s.title,
+            "url": s.url,
+            "summary": s.summary.split("\n"),
+            "length": s.length,
+            "bullets": s.bullets,
+            "created_at": s.created_at.isoformat() if s.created_at else None,
+        }
+        for s in summaries
+    ]
 
 
 @app.get("/")
