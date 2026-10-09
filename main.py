@@ -19,9 +19,8 @@ from sqlalchemy.orm import declarative_base, sessionmaker, Session
 load_dotenv()
 
 # Database setup & Render 'postgres://' compatibility fix
-DATABASE_URL = os.getenv(
-    "DATABASE_URL", "postgresql://postgres:YOUR_PASSWORD@localhost:5432/inciteai"
-)
+DEFAULT_DB = "postgresql://postgres:YOUR_PASSWORD@localhost:5432/inciteai"
+DATABASE_URL = os.getenv("DATABASE_URL", DEFAULT_DB)
 if DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 
@@ -43,10 +42,14 @@ class Summary(Base):
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
 
-# Create tables during application startup instead of module import
+# Create tables safely during application startup
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    Base.metadata.create_all(bind=engine)
+    try:
+        Base.metadata.create_all(bind=engine)
+        print("Connected to PostgreSQL and tables verified.")
+    except Exception as e:
+        print(f"Warning: Database startup check failed: {e}")
     yield
 
 
@@ -57,7 +60,7 @@ limiter = Limiter(key_func=get_remote_address)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
-# CORS configuration (supports local dev + production frontends via FRONTEND_URLS env var)
+# CORS configuration (supports local dev + production frontends)
 allowed_origins = [
     "http://localhost:5173",
     "http://localhost:3000",
@@ -98,7 +101,11 @@ class ScrapeRequest(BaseModel):
 
 def extract_article_data(url: str):
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/120.0.0.0 Safari/537.36"
+        )
     }
     try:
         response = requests.get(url, headers=headers, timeout=10)
@@ -137,19 +144,20 @@ def generate_summary(article_text: str, length: str, bullets: int):
     if not article_text.strip():
         return None
     try:
-        prompt = f"""
-        You are an expert research analyst. Analyze the following article text and extract exactly {bullets} core insights.
-        
-        The target depth of each insight should be {length.upper()}.
-        - If SHORT: Keep each bullet extremely concise, snappy, and under one sentence.
-        - If MEDIUM: Provide balanced, clear sentences packed with structural context.
-        - If DETAILED: Provide rich, multi-sentence explanations full of nuance, metrics, and technical depth.
-        
-        Do not include any introductory or concluding text. Return your response strictly as bullet points.
-        
-        Article Text:
-        {article_text}
-        """
+        prompt = (
+            "You are an expert research analyst. Analyze the following "
+            f"article text and extract exactly {bullets} core insights.\n\n"
+            f"The target depth of each insight should be {length.upper()}.\n"
+            "- If SHORT: Keep each bullet extremely concise, snappy, and "
+            "under one sentence.\n"
+            "- If MEDIUM: Provide balanced, clear sentences packed with "
+            "structural context.\n"
+            "- If DETAILED: Provide rich, multi-sentence explanations full "
+            "of nuance, metrics, and technical depth.\n\n"
+            "Do not include any introductory or concluding text. Return your "
+            "response strictly as bullet points.\n\n"
+            f"Article Text:\n{article_text}"
+        )
         response = genai_client.models.generate_content(
             model="gemini-2.0-flash",
             contents=prompt,
@@ -199,7 +207,7 @@ def scrape_endpoint(
     if not summary_bullets:
         raise HTTPException(
             status_code=500,
-            detail="The AI service was unable to generate a summary for this text.",
+            detail="The AI service was unable to generate a summary.",
         )
 
     # Save to database
@@ -221,6 +229,24 @@ def scrape_endpoint(
         "url": target_url,
         "summary": summary_bullets,
     }
+
+
+@app.get("/history")
+def get_history(limit: int = 10, db: Session = Depends(get_db)):
+    """Fetch recent summaries stored in the PostgreSQL database."""
+    summaries = db.query(Summary).order_by(Summary.created_at.desc()).limit(limit).all()
+    return [
+        {
+            "id": s.id,
+            "title": s.title,
+            "url": s.url,
+            "summary": s.summary.split("\n"),
+            "length": s.length,
+            "bullets": s.bullets,
+            "created_at": s.created_at.isoformat() if s.created_at else None,
+        }
+        for s in summaries
+    ]
 
 
 @app.get("/")
