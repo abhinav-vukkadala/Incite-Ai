@@ -6,8 +6,18 @@ const API_URL = (
   "http://localhost:8000"
 ).replace(/\/$/, "");
 
+const STORAGE_KEY = "incite_ai_history";
+
 export default function App() {
-  const [history, setHistory] = useState([]);
+  const [history, setHistory] = useState(() => {
+    try {
+      const saved = localStorage.getItem(STORAGE_KEY);
+      return saved ? JSON.parse(saved) : [];
+    } catch {
+      return [];
+    }
+  });
+
   const [activeChat, setActiveChat] = useState(null);
   const [url, setUrl] = useState("");
   const [length, setLength] = useState("medium");
@@ -17,24 +27,14 @@ export default function App() {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [copiedId, setCopiedId] = useState(null);
 
+  // Sync state to localStorage whenever history changes
   useEffect(() => {
-    fetchHistory();
-  }, []);
-
-  const fetchHistory = async () => {
     try {
-      const res = await fetch(`${API_URL}/history?limit=50`);
-      if (res.ok) {
-        const data = await res.json();
-        setHistory(data);
-        if (data.length > 0 && !activeChat) {
-          setActiveChat(data[0]);
-        }
-      }
-    } catch (err) {
-      console.error("Failed to load history from database:", err);
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(history));
+    } catch (e) {
+      console.error("Failed to write to localStorage:", e);
     }
-  };
+  }, [history]);
 
   const handleSummarize = async (e) => {
     if (e) e.preventDefault();
@@ -60,7 +60,14 @@ export default function App() {
         throw new Error(data.detail || "Unable to summarize article.");
       }
 
-      setHistory((prev) => [data, ...prev]);
+      setHistory((prev) => {
+        const next = [data, ...prev.filter((item) => item.id !== data.id)];
+        try {
+          localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+        } catch {}
+        return next;
+      });
+
       setActiveChat(data);
       setUrl("");
     } catch (err) {
@@ -91,26 +98,25 @@ export default function App() {
   const handleDelete = async (e, id) => {
     e.stopPropagation();
     try {
-      const res = await fetch(`${API_URL}/history/${id}`, {
-        method: "DELETE",
-      });
-      if (res.ok) {
-        const updated = history.filter((item) => item.id !== id);
-        setHistory(updated);
-        if (activeChat?.id === id) {
-          setActiveChat(updated.length > 0 ? updated[0] : null);
-        }
+      await fetch(`${API_URL}/history/${id}`, { method: "DELETE" });
+    } catch {}
+    setHistory((prev) => {
+      const updated = prev.filter((item) => item.id !== id);
+      if (activeChat?.id === id) {
+        setActiveChat(updated.length > 0 ? updated[0] : null);
       }
-    } catch (err) {
-      console.error("Failed to delete chat:", err);
-    }
+      return updated;
+    });
   };
 
   const handleCopy = (id, bulletsList) => {
+    if (!bulletsList) return;
     navigator.clipboard.writeText(bulletsList.map((b) => `• ${b}`).join("\n"));
     setCopiedId(id);
     setTimeout(() => setCopiedId(null), 2000);
   };
+
+  const activeOrLatest = activeChat || (history.length > 0 ? history[0] : null);
 
   return (
     <div className="flex h-screen bg-[#131314] text-[#E3E3E3] font-sans overflow-hidden antialiased">
@@ -155,7 +161,7 @@ export default function App() {
           </button>
         </div>
 
-        {/* History Chat Titles */}
+        {/* History List */}
         <div className="flex-1 overflow-y-auto px-2 py-3 space-y-1">
           <div className="px-3 pb-2 text-[11px] font-semibold text-gray-400 uppercase tracking-wider">
             Recent Research
@@ -163,11 +169,11 @@ export default function App() {
 
           {history.length === 0 ? (
             <div className="text-center py-10 px-4 text-xs text-gray-500">
-              No saved chats yet. Enter an article link below to begin.
+              No saved chats yet.
             </div>
           ) : (
             history.map((item) => {
-              const isActive = activeChat?.id === item.id;
+              const isActive = activeOrLatest?.id === item.id;
               return (
                 <div
                   key={item.id}
@@ -181,7 +187,7 @@ export default function App() {
                       : "hover:bg-[#282A2C] text-gray-300"
                   }`}
                 >
-                  <div className="flex items-center gap-2 overflow-hidden pr-10">
+                  <div className="flex items-center gap-2 overflow-hidden pr-8">
                     {item.is_pinned && (
                       <span className="text-yellow-400 text-xs shrink-0">
                         📌
@@ -213,16 +219,11 @@ export default function App() {
             })
           )}
         </div>
-
-        <div className="p-3 border-t border-[#2D2F31] text-[11px] text-gray-400 flex items-center justify-between">
-          <span>Incite Research Agent</span>
-          <span className="text-blue-400 font-mono">v1.2</span>
-        </div>
       </aside>
 
-      {/* ----------------- CHAT CONVERSATION VIEW ----------------- */}
+      {/* ----------------- MAIN VIEW ----------------- */}
       <main className="flex-1 flex flex-col relative h-full overflow-hidden bg-[#131314]">
-        {/* Top Chat Header */}
+        {/* Header */}
         <header className="h-14 border-b border-[#2D2F31] px-4 flex items-center justify-between shrink-0">
           <div className="flex items-center gap-3 overflow-hidden">
             <button
@@ -244,195 +245,125 @@ export default function App() {
               </svg>
             </button>
             <span className="text-sm font-medium text-gray-200 truncate">
-              {activeChat ? activeChat.title : "New Research Session"}
+              {activeOrLatest ? activeOrLatest.title : "Research Session"}
             </span>
           </div>
 
-          {activeChat && (
+          {activeOrLatest?.url && (
             <a
-              href={activeChat.url}
+              href={activeOrLatest.url}
               target="_blank"
               rel="noopener noreferrer"
-              className="flex items-center gap-1.5 text-xs text-blue-400 hover:text-blue-300 bg-blue-500/10 px-3 py-1.5 rounded-full border border-blue-500/20 transition shrink-0"
+              className="text-xs text-blue-400 hover:underline shrink-0"
             >
-              <span>Source URL</span>
-              <span>↗</span>
+              Source ↗
             </a>
           )}
         </header>
 
-        {/* Conversation Area */}
-        <div className="flex-1 overflow-y-auto px-4 py-8 max-w-4xl w-full mx-auto space-y-6">
-          {!activeChat ? (
-            <div className="h-full flex flex-col items-center justify-center text-center space-y-4 my-auto">
-              <div className="w-14 h-14 rounded-2xl bg-[#1E1F20] border border-[#2D2F31] flex items-center justify-center text-blue-400 shadow-xl">
-                <svg className="w-7 h-7 fill-current" viewBox="0 0 24 24">
-                  <path d="M12 2L15.09 8.26L22 9.27L17 14.14L18.18 21.02L12 17.77L5.82 21.02L7 14.14L2 9.27L8.91 8.26L12 2Z" />
-                </svg>
+        {/* Content Display */}
+        <div className="flex-1 overflow-y-auto px-4 py-6 max-w-4xl w-full mx-auto space-y-6">
+          {activeOrLatest ? (
+            <div className="bg-[#1E1F20] border border-[#2D2F31] rounded-2xl p-6 shadow-sm">
+              <div className="flex items-center justify-between pb-4 border-b border-[#2D2F31] mb-4">
+                <h1 className="text-lg font-semibold text-white tracking-tight">
+                  {activeOrLatest.title}
+                </h1>
+                <button
+                  onClick={() =>
+                    handleCopy(activeOrLatest.id, activeOrLatest.summary)
+                  }
+                  className="text-xs text-gray-400 hover:text-white bg-[#282A2C] px-2.5 py-1.5 rounded-lg border border-[#353739]"
+                >
+                  {copiedId === activeOrLatest.id ? "✓ Copied" : "Copy"}
+                </button>
               </div>
-              <h2 className="text-2xl font-semibold text-white tracking-tight">
-                Where should we focus today?
-              </h2>
-              <p className="text-sm text-gray-400 max-w-md leading-relaxed">
-                Paste any article or research paper link. Incite AI extracts
-                structural takeaways, assigns a smart topic title, and saves
-                everything to your database.
-              </p>
+
+              <ul className="space-y-3">
+                {activeOrLatest.summary?.map((point, idx) => (
+                  <li
+                    key={idx}
+                    className="flex items-start gap-3 text-sm text-gray-300 leading-relaxed"
+                  >
+                    <span className="w-1.5 h-1.5 rounded-full bg-blue-400 mt-2 shrink-0" />
+                    <span>{point}</span>
+                  </li>
+                ))}
+              </ul>
             </div>
           ) : (
-            <div className="space-y-6">
-              {/* User Article Link Bubble */}
-              <div className="flex justify-end">
-                <div className="bg-[#282A2C] border border-[#353739] text-gray-200 px-4 py-3 rounded-2xl rounded-tr-sm text-sm max-w-lg shadow-sm">
-                  <div className="text-[11px] text-gray-400 font-medium mb-1">
-                    Target Article
-                  </div>
-                  <a
-                    href={activeChat.url}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="text-blue-400 hover:underline break-all font-mono text-xs"
-                  >
-                    {activeChat.url}
-                  </a>
-                </div>
-              </div>
-
-              {/* AI Response Bubble */}
-              <div className="flex gap-4">
-                <div className="w-8 h-8 rounded-full bg-gradient-to-tr from-blue-600 to-indigo-500 flex items-center justify-center text-white shrink-0 mt-1 shadow-md">
-                  <svg className="w-4 h-4 fill-current" viewBox="0 0 24 24">
-                    <path d="M12 2L15.09 8.26L22 9.27L17 14.14L18.18 21.02L12 17.77L5.82 21.02L7 14.14L2 9.27L8.91 8.26L12 2Z" />
-                  </svg>
-                </div>
-
-                <div className="flex-1 bg-[#1E1F20] border border-[#2D2F31] rounded-2xl rounded-tl-sm p-6 shadow-sm">
-                  <div className="flex items-center justify-between pb-4 border-b border-[#2D2F31] mb-4">
-                    <h1 className="text-lg font-semibold text-white tracking-tight">
-                      {activeChat.title}
-                    </h1>
-                    <button
-                      onClick={() =>
-                        handleCopy(activeChat.id, activeChat.summary)
-                      }
-                      className="flex items-center gap-1.5 text-xs text-gray-400 hover:text-white transition bg-[#282A2C] px-2.5 py-1.5 rounded-lg border border-[#353739]"
-                      title="Copy Takeaways"
-                    >
-                      {copiedId === activeChat.id ? (
-                        <span className="text-green-400 font-medium">
-                          ✓ Copied
-                        </span>
-                      ) : (
-                        <span>Copy</span>
-                      )}
-                    </button>
-                  </div>
-
-                  {/* Bullet Points */}
-                  <ul className="space-y-3.5">
-                    {activeChat.summary.map((point, idx) => (
-                      <li
-                        key={idx}
-                        className="flex items-start gap-3 text-sm text-gray-300 leading-relaxed"
-                      >
-                        <span className="w-1.5 h-1.5 rounded-full bg-blue-400 mt-2 shrink-0" />
-                        <span>{point}</span>
-                      </li>
-                    ))}
-                  </ul>
-
-                  {/* Badges */}
-                  <div className="flex items-center gap-2 mt-6 pt-4 border-t border-[#2D2F31] text-[11px] text-gray-400 font-mono">
-                    <span className="bg-[#282A2C] px-2.5 py-1 rounded-md border border-[#353739]">
-                      Depth: {activeChat.length?.toUpperCase()}
-                    </span>
-                    <span className="bg-[#282A2C] px-2.5 py-1 rounded-md border border-[#353739]">
-                      Bullets: {activeChat.bullets}
-                    </span>
-                    {activeChat.created_at && (
-                      <span className="text-gray-500 ml-auto">
-                        {new Date(activeChat.created_at).toLocaleDateString()}
-                      </span>
-                    )}
-                  </div>
-                </div>
-              </div>
+            <div className="h-64 flex flex-col items-center justify-center text-center space-y-3 text-gray-400">
+              <h2 className="text-xl font-medium text-gray-200">
+                Ready to summarize
+              </h2>
+              <p className="text-xs max-w-sm">
+                Paste an article URL below to extract key insights.
+              </p>
             </div>
           )}
 
           {error && (
-            <div className="p-4 rounded-xl bg-red-950/40 border border-red-500/30 text-red-300 text-sm flex items-center gap-3">
-              <span className="text-lg">⚠️</span>
-              <p>{error}</p>
+            <div className="p-4 rounded-xl bg-red-950/40 border border-red-500/30 text-red-300 text-sm">
+              {error}
             </div>
           )}
         </div>
 
-        {/* ----------------- FLOATING PROMPT PILL DOCK ----------------- */}
+        {/* ----------------- INPUT & CONTROLS DOCK ----------------- */}
         <div className="p-4 max-w-4xl w-full mx-auto shrink-0">
           <form
             onSubmit={handleSummarize}
-            className="bg-[#1E1F20] border border-[#2D2F31] focus-within:border-blue-500 rounded-2xl p-2.5 shadow-2xl transition"
+            className="bg-[#1E1F20] border border-[#2D2F31] focus-within:border-blue-500 rounded-2xl p-3 shadow-xl transition space-y-3"
           >
-            <div className="flex items-center gap-2 px-2">
+            <div className="flex items-center gap-2">
               <input
                 type="url"
-                placeholder="Paste article link (e.g., https://en.wikipedia.org/wiki/Artificial_intelligence)"
+                placeholder="Paste article URL here"
                 value={url}
                 onChange={(e) => setUrl(e.target.value)}
                 disabled={loading}
-                required
-                className="flex-1 bg-transparent text-sm text-white placeholder-gray-500 focus:outline-none py-1"
+                className="flex-1 bg-transparent text-sm text-white placeholder-gray-500 focus:outline-none px-2"
               />
               <button
                 type="submit"
-                disabled={loading || !url.trim()}
-                className="w-9 h-9 rounded-xl bg-blue-600 hover:bg-blue-500 disabled:opacity-40 disabled:hover:bg-blue-600 flex items-center justify-center text-white transition shrink-0 shadow-md"
+                disabled={loading}
+                className="px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-white text-xs font-medium transition shrink-0"
               >
-                {loading ? (
-                  <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                ) : (
-                  <svg
-                    className="w-4 h-4 fill-current rotate-45 -mr-0.5"
-                    viewBox="0 0 24 24"
-                  >
-                    <path d="M2 21L23 12L2 3V10L17 12L2 14V21Z" />
-                  </svg>
-                )}
+                {loading ? "Generating..." : "Generate Insight"}
               </button>
             </div>
 
-            {/* Config Controls */}
-            <div className="flex items-center gap-4 px-2 pt-2.5 mt-2 border-t border-[#2D2F31] text-xs">
-              <span className="text-gray-400 font-medium">Parameters:</span>
-
-              {/* Bullet Count Selector */}
-              <div className="flex items-center gap-1.5">
-                <label className="text-gray-400">Bullets:</label>
-                <select
+            {/* Slider & Depth Controls */}
+            <div className="flex flex-wrap items-center justify-between gap-4 pt-2 border-t border-[#2D2F31] text-xs px-2">
+              <div className="flex items-center gap-3">
+                <label htmlFor="bullet-slider" className="text-gray-400">
+                  Bullet Points
+                </label>
+                <input
+                  id="bullet-slider"
+                  type="range"
+                  min="1"
+                  max="7"
                   value={bullets}
                   onChange={(e) => setBullets(Number(e.target.value))}
-                  className="bg-[#282A2C] text-gray-200 border border-[#353739] rounded-md px-2 py-0.5 text-xs focus:outline-none"
-                >
-                  {[1, 2, 3, 4, 5, 6, 7].map((num) => (
-                    <option key={num} value={num}>
-                      {num} points
-                    </option>
-                  ))}
-                </select>
+                  className="w-28 accent-blue-500 cursor-pointer"
+                />
+                <span className="font-mono text-blue-400 w-4 text-center">
+                  {bullets}
+                </span>
+                <span className="text-[10px] text-gray-500">7</span>
               </div>
 
-              {/* Depth Selector */}
-              <div className="flex items-center gap-1.5">
-                <label className="text-gray-400">Depth:</label>
+              <div className="flex items-center gap-2">
+                <span className="text-gray-400">Depth:</span>
                 <select
                   value={length}
                   onChange={(e) => setLength(e.target.value)}
-                  className="bg-[#282A2C] text-gray-200 border border-[#353739] rounded-md px-2 py-0.5 text-xs focus:outline-none capitalize"
+                  className="bg-[#282A2C] text-gray-300 border border-[#353739] rounded px-2 py-0.5 text-xs focus:outline-none"
                 >
-                  <option value="short">Short (Snappy)</option>
-                  <option value="medium">Medium (Balanced)</option>
-                  <option value="detailed">Detailed (In-depth)</option>
+                  <option value="short">Short</option>
+                  <option value="medium">Medium</option>
+                  <option value="detailed">Detailed</option>
                 </select>
               </div>
             </div>

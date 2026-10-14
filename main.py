@@ -13,7 +13,6 @@ from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from google import genai
-from google.genai.errors import APIError
 from pydantic import BaseModel, Field
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
@@ -37,11 +36,11 @@ load_dotenv()
 # Configuration
 # ---------------------------------------------------------------------------
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
-RATE_LIMIT = os.getenv("RATE_LIMIT", "15/minute")
+RATE_LIMIT = os.getenv("RATE_LIMIT", "5/minute")
 MAX_REDIRECTS = 5
+MAX_DOWNLOAD_BYTES = 2_000_000
 MAX_ARTICLE_CHARS = 7500
 
-# Standard browser headers (WITHOUT manual Accept-Encoding so requests auto-decompresses)
 REQUEST_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -100,7 +99,6 @@ async def lifespan(app: FastAPI):
                 )
                 conn.commit()
         Base.metadata.create_all(bind=engine)
-        print("Database connected and schema verified.")
     except Exception as e:
         print(f"Database warning: {e}")
     yield
@@ -190,7 +188,7 @@ class ScrapeError(Exception):
 
 
 # ---------------------------------------------------------------------------
-# Scraping Logic (Clean Text Extraction)
+# Scraping Logic & SSRF Protection
 # ---------------------------------------------------------------------------
 def is_safe_url(url: str) -> bool:
     try:
@@ -218,22 +216,28 @@ def is_safe_url(url: str) -> bool:
     return True
 
 
-def fetch_page(url: str) -> str:
+def fetch_page(url: str) -> bytes:
     current = url
     session = requests.Session()
     session.headers.update(REQUEST_HEADERS)
 
     for _ in range(MAX_REDIRECTS + 1):
         if not is_safe_url(current):
-            raise ScrapeError("URL is not allowed. Please enter a public web link.")
+            if current != url:
+                raise ScrapeError("That redirect target isn't allowed.")
+            raise ScrapeError(
+                "That address isn't allowed. Please provide a public http(s) link."
+            )
 
-        response = session.get(current, timeout=8, allow_redirects=False)
+        response = session.get(current, timeout=8, allow_redirects=False, stream=True)
         try:
             if response.is_redirect:
                 location = response.headers.get("Location")
                 if not location:
-                    raise ScrapeError("Invalid redirect from target website.")
+                    raise ScrapeError("The site returned an invalid redirect.")
                 current = urljoin(current, location)
+                if not is_safe_url(current):
+                    raise ScrapeError("That redirect target isn't allowed.")
                 continue
 
             if response.status_code in (401, 403):
@@ -247,8 +251,13 @@ def fetch_page(url: str) -> str:
 
             response.raise_for_status()
 
-            # Using response.text lets requests automatically handle encoding and gzip decompression
-            return response.text
+            chunks, size = [], 0
+            for chunk in response.iter_content(65536):
+                chunks.append(chunk)
+                size += len(chunk)
+                if size > MAX_DOWNLOAD_BYTES:
+                    break
+            return b"".join(chunks)
         finally:
             response.close()
 
@@ -256,12 +265,53 @@ def fetch_page(url: str) -> str:
 
 
 def extract_article_data(url: str) -> dict:
-    html_text = fetch_page(url)
+    try:
+        raw_content = fetch_page(url)
+    except ScrapeError:
+        raise
+    except requests.exceptions.Timeout:
+        raise ScrapeError("Request timed out while loading the page.")
+    except requests.exceptions.HTTPError as e:
+        status_code = e.response.status_code if e.response is not None else None
+        if status_code in (401, 403):
+            raise ScrapeError(
+                "Unable to summarize this article because automated scrapers are blocked by this website."
+            )
+        raise ScrapeError(
+            f"HTTP error ({status_code or 'unknown'}) encountered from host site."
+        )
+    except (requests.exceptions.RequestException, Exception) as e:
+        raise ScrapeError(f"Failed to fetch target page: {e}")
+
+    if isinstance(raw_content, bytes):
+        html_text = raw_content.decode("utf-8", errors="replace")
+    else:
+        html_text = str(raw_content)
+
     soup = BeautifulSoup(html_text, "html.parser")
 
-    title_tag = soup.find("h1") or soup.find("h2") or soup.find("title")
-    title_text = title_tag.get_text(strip=True) if title_tag else "Article Summary"
+    # Priority 1: h1 tag
+    h1 = soup.find("h1")
+    title_text = h1.get_text(strip=True) if h1 and h1.get_text(strip=True) else None
 
+    # Priority 2: h2 tag
+    if not title_text:
+        h2 = soup.find("h2")
+        title_text = h2.get_text(strip=True) if h2 and h2.get_text(strip=True) else None
+
+    # Priority 3: title tag
+    if not title_text:
+        title_tag = soup.find("title")
+        title_text = (
+            title_tag.get_text(strip=True)
+            if title_tag and title_tag.get_text(strip=True)
+            else None
+        )
+
+    if not title_text:
+        title_text = "Article Summary"
+
+    # Strict paragraph filtering: only paragraphs with length > 30 characters
     paragraphs = []
     for region in (soup.find("article"), soup.find("main")):
         if region is not None:
@@ -270,22 +320,20 @@ def extract_article_data(url: str) -> dict:
                 for p in region.find_all("p")
                 if len(p.get_text(strip=True)) > 30
             ]
-            if sum(len(p) for p in paragraphs) > 400:
+            if sum(len(p) for p in paragraphs) > 200:
                 break
-    if sum(len(p) for p in paragraphs) <= 400:
+    if sum(len(p) for p in paragraphs) <= 200:
         paragraphs = [
             p.get_text(strip=True)
             for p in soup.find_all("p")
             if len(p.get_text(strip=True)) > 30
         ]
 
-    body = "\n\n".join(paragraphs)[:MAX_ARTICLE_CHARS]
-    if not body.strip():
-        raise ScrapeError(
-            "Could not extract readable article text. The website content may be dynamically rendered or protected by a paywall."
-        )
+    body = "\n\n".join(paragraphs).strip()
+    if not body:
+        raise ScrapeError("Could not extract readable article text from this site.")
 
-    return {"title": title_text, "body": body}
+    return {"title": title_text, "body": body[:MAX_ARTICLE_CHARS]}
 
 
 # ---------------------------------------------------------------------------
