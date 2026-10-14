@@ -94,7 +94,8 @@ async def lifespan(app: FastAPI):
             if not DATABASE_URL.startswith("sqlite"):
                 conn.execute(
                     text(
-                        "ALTER TABLE summaries ADD COLUMN IF NOT EXISTS is_pinned BOOLEAN DEFAULT FALSE NOT NULL;"
+                        "ALTER TABLE summaries ADD COLUMN IF NOT EXISTS "
+                        "is_pinned BOOLEAN DEFAULT FALSE NOT NULL;"
                     )
                 )
                 conn.commit()
@@ -218,18 +219,20 @@ def is_safe_url(url: str) -> bool:
 
 def fetch_page(url: str) -> bytes:
     current = url
-    session = requests.Session()
-    session.headers.update(REQUEST_HEADERS)
 
     for _ in range(MAX_REDIRECTS + 1):
         if not is_safe_url(current):
-            if current != url:
-                raise ScrapeError("That redirect target isn't allowed.")
             raise ScrapeError(
                 "That address isn't allowed. Please provide a public http(s) link."
             )
 
-        response = session.get(current, timeout=8, allow_redirects=False, stream=True)
+        response = requests.get(
+            current,
+            headers=REQUEST_HEADERS,
+            timeout=8,
+            allow_redirects=False,
+            stream=True,
+        )
         try:
             if response.is_redirect:
                 location = response.headers.get("Location")
@@ -242,11 +245,13 @@ def fetch_page(url: str) -> bytes:
 
             if response.status_code in (401, 403):
                 raise ScrapeError(
-                    "Unable to summarize this article because automated scrapers are blocked by this website."
+                    "Unable to summarize this article because automated scrapers "
+                    "are blocked by this website."
                 )
             if response.status_code == 429:
                 raise ScrapeError(
-                    "The website is rate limiting requests. Please try again in a few moments."
+                    "The website is rate limiting requests. Please try again "
+                    "in a few moments."
                 )
 
             response.raise_for_status()
@@ -270,17 +275,16 @@ def extract_article_data(url: str) -> dict:
     except ScrapeError:
         raise
     except requests.exceptions.Timeout:
-        raise ScrapeError("Request timed out while loading the page.")
+        raise ScrapeError("Request took too long to load.")
     except requests.exceptions.HTTPError as e:
-        status_code = e.response.status_code if e.response is not None else None
+        status_code = getattr(getattr(e, "response", None), "status_code", "unknown")
         if status_code in (401, 403):
             raise ScrapeError(
-                "Unable to summarize this article because automated scrapers are blocked by this website."
+                "Unable to summarize this article because automated scrapers "
+                "are blocked by this website."
             )
-        raise ScrapeError(
-            f"HTTP error ({status_code or 'unknown'}) encountered from host site."
-        )
-    except (requests.exceptions.RequestException, Exception) as e:
+        raise ScrapeError(f"Site returned HTTP {status_code} error.")
+    except requests.exceptions.RequestException as e:
         raise ScrapeError(f"Failed to fetch target page: {e}")
 
     if isinstance(raw_content, bytes):
@@ -290,16 +294,13 @@ def extract_article_data(url: str) -> dict:
 
     soup = BeautifulSoup(html_text, "html.parser")
 
-    # Priority 1: h1 tag
     h1 = soup.find("h1")
     title_text = h1.get_text(strip=True) if h1 and h1.get_text(strip=True) else None
 
-    # Priority 2: h2 tag
     if not title_text:
         h2 = soup.find("h2")
         title_text = h2.get_text(strip=True) if h2 and h2.get_text(strip=True) else None
 
-    # Priority 3: title tag
     if not title_text:
         title_tag = soup.find("title")
         title_text = (
@@ -311,7 +312,6 @@ def extract_article_data(url: str) -> dict:
     if not title_text:
         title_text = "Article Summary"
 
-    # Strict paragraph filtering: only paragraphs with length > 30 characters
     paragraphs = []
     for region in (soup.find("article"), soup.find("main")):
         if region is not None:
@@ -342,8 +342,8 @@ def extract_article_data(url: str) -> dict:
 BULLET_RE = re.compile(r"^\s*(?:[-*•]|\d+[.)])\s+")
 
 
-def parse_bullets(text: str, limit: int) -> list:
-    lines = [line.strip() for line in text.strip().splitlines() if line.strip()]
+def parse_bullets(text_content: str, limit: int) -> list:
+    lines = [line.strip() for line in text_content.strip().splitlines() if line.strip()]
     marked = [BULLET_RE.sub("", line) for line in lines if BULLET_RE.match(line)]
     points = marked or lines
     points = [p.replace("**", "").strip() for p in points]
@@ -355,11 +355,11 @@ def generate_summary(article_text: str, length: str, bullets: int):
         "You are an expert research analyst. Analyze the following article text "
         f"and extract exactly {bullets} core insights.\n\n"
         f"The target depth of each insight should be {length.upper()}.\n"
-        "- If SHORT: Keep each bullet extremely concise, snappy, and under one sentence.\n"
-        "- If MEDIUM: Provide balanced, clear sentences packed with structural context.\n"
-        "- If DETAILED: Provide rich, multi-sentence explanations full of nuance, metrics, and technical depth.\n\n"
-        "Do not include any introductory or concluding text. Return your response strictly "
-        "as bullet points, one per line, each starting with '- '.\n\n"
+        "- If SHORT: Keep each bullet extremely concise and snappy.\n"
+        "- If MEDIUM: Provide balanced, clear sentences with context.\n"
+        "- If DETAILED: Provide rich, multi-sentence explanations with depth.\n\n"
+        "Do not include any introductory or concluding text. Return your response\n"
+        "strictly as bullet points, one per line, each starting with '- '.\n\n"
         f"Article Text:\n{article_text}"
     )
 
@@ -371,14 +371,6 @@ def generate_summary(article_text: str, length: str, bullets: int):
     except Exception as e:
         print(f"Error calling {GEMINI_MODEL}: {e}")
     return None
-
-
-def clean_chat_title(raw_title: str) -> str:
-    cleaned = re.sub(r"\s*[-|•–—].*$", "", raw_title).strip()
-    words = cleaned.split()
-    if len(words) > 7:
-        return " ".join(words[:6]) + "..."
-    return cleaned or "Article Summary"
 
 
 # ---------------------------------------------------------------------------
@@ -409,10 +401,13 @@ def scrape_endpoint(
     if not summary_bullets:
         raise HTTPException(
             status_code=500,
-            detail="The AI service was unable to generate a summary. Please try another article link.",
+            detail=(
+                "The AI service was unable to generate a summary. "
+                "Please try another article link."
+            ),
         )
 
-    chat_title = clean_chat_title(scraped["title"])
+    chat_title = scraped["title"]
 
     try:
         db_summary = Summary(
@@ -442,7 +437,9 @@ def scrape_endpoint(
         length=db_summary.length,
         bullets=db_summary.bullets,
         is_pinned=db_summary.is_pinned,
-        created_at=db_summary.created_at.isoformat() if db_summary.created_at else None,
+        created_at=(
+            db_summary.created_at.isoformat() if db_summary.created_at else None
+        ),
     )
 
 
