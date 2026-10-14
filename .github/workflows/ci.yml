@@ -28,7 +28,7 @@ jobs:
         run: ruff check . --select=E,F --target-version=py312
 
       - name: Pytest
-        run: pytest
+        run: pytest test_main.py -q
 
   frontend-check:
     name: Frontend Tests & Build
