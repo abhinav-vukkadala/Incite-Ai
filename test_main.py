@@ -1,500 +1,215 @@
-import ipaddress
 import os
-import re
-import socket
-from contextlib import asynccontextmanager
-from datetime import datetime, timezone
-from typing import List, Literal, Optional
-from urllib.parse import urljoin, urlparse
 
+# Must be set before importing main so no real database or API key is needed.
+os.environ["DATABASE_URL"] = "sqlite://"
+os.environ.setdefault("GEMINI_API_KEY", "test-key")
+
+from unittest.mock import patch
+
+import pytest
 import requests
-from bs4 import BeautifulSoup
-from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
-from fastapi.middleware.cors import CORSMiddleware
-from google import genai
-from pydantic import BaseModel, Field
-from slowapi import Limiter, _rate_limit_exceeded_handler
-from slowapi.errors import RateLimitExceeded
-from slowapi.util import get_remote_address
-from sqlalchemy import (
-    Boolean,
-    Column,
-    DateTime,
-    Integer,
-    String,
-    Text,
-    create_engine,
-    text,
-)
-from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.orm import Session, declarative_base, sessionmaker
+from fastapi.testclient import TestClient
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
 
-load_dotenv()
+import main
 
-# ---------------------------------------------------------------------------
-# Configuration
-# ---------------------------------------------------------------------------
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
-RATE_LIMIT = os.getenv("RATE_LIMIT", "5/minute")
-MAX_REDIRECTS = 5
-MAX_DOWNLOAD_BYTES = 2_000_000
-MAX_ARTICLE_CHARS = 7500
-
-REQUEST_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/124.0.0.0 Safari/537.36"
-    ),
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.9",
-    "Connection": "keep-alive",
-}
-
-# ---------------------------------------------------------------------------
-# Database Setup
-# ---------------------------------------------------------------------------
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./incite.db")
-if DATABASE_URL.startswith("postgres://"):
-    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
-
-engine_kwargs = {"pool_pre_ping": True}
-if DATABASE_URL.startswith("sqlite"):
-    engine_kwargs["connect_args"] = {"check_same_thread": False}
-
-engine = create_engine(DATABASE_URL, **engine_kwargs)
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-Base = declarative_base()
+ARTICLE = {"title": "Test Article", "body": "Some readable article text."}
+LONG_P = "x" * 40
 
 
-class Summary(Base):
-    __tablename__ = "summaries"
+class FakeResponse:
+    def __init__(self, html="", status=200, headers=None):
+        self.content = html.encode()
+        self.status_code = status
+        self.headers = headers or {}
 
-    id = Column(Integer, primary_key=True, index=True)
-    user_email = Column(String(255), default="guest", nullable=False)
-    title = Column(String(512), nullable=False)
-    url = Column(String(2048), nullable=False)
-    summary = Column(Text, nullable=False)
-    length = Column(String(50), nullable=False)
-    bullets = Column(Integer, nullable=False)
-    is_pinned = Column(Boolean, default=False, nullable=False)
-    created_at = Column(
-        DateTime(timezone=True),
-        default=lambda: datetime.now(timezone.utc),
-        nullable=False,
+    @property
+    def is_redirect(self):
+        redirect_codes = (301, 302, 303, 307, 308)
+        return self.status_code in redirect_codes and "Location" in self.headers
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise requests.exceptions.HTTPError(response=self)
+
+    def iter_content(self, chunk_size=1):
+        yield self.content
+
+    def close(self):
+        pass
+
+
+@pytest.fixture()
+def client():
+    test_engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
     )
+    main.Base.metadata.create_all(bind=test_engine)
+    TestSession = sessionmaker(bind=test_engine, autoflush=False, autocommit=False)
 
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    try:
-        with engine.connect() as conn:
-            conn.execute(text("SELECT 1"))
-            if not DATABASE_URL.startswith("sqlite"):
-                conn.execute(
-                    text(
-                        "ALTER TABLE summaries ADD COLUMN IF NOT EXISTS "
-                        "is_pinned BOOLEAN DEFAULT FALSE NOT NULL;"
-                    )
-                )
-                conn.commit()
-        Base.metadata.create_all(bind=engine)
-    except Exception as e:
-        print(f"Database warning: {e}")
-    yield
-
-
-app = FastAPI(lifespan=lifespan)
-
-
-# ---------------------------------------------------------------------------
-# Rate Limiting & CORS
-# ---------------------------------------------------------------------------
-def client_ip(request: Request) -> str:
-    forwarded = request.headers.get("x-forwarded-for")
-    if forwarded:
-        return forwarded.split(",")[0].strip()
-    return get_remote_address(request)
-
-
-limiter = Limiter(key_func=client_ip)
-app.state.limiter = limiter
-app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
-
-allowed_origins = [
-    "http://localhost:5173",
-    "http://localhost:3000",
-    "http://127.0.0.1:5173",
-    "https://incite-ai.vercel.app",
-]
-env_origins = os.getenv("FRONTEND_URLS")
-if env_origins:
-    allowed_origins.extend(
-        [origin.strip() for origin in env_origins.split(",") if origin.strip()]
-    )
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=allowed_origins,
-    allow_origin_regex=r"https://incite-ai[a-z0-9-]*\.vercel\.app",
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# ---------------------------------------------------------------------------
-# Gemini Client
-# ---------------------------------------------------------------------------
-_genai_client = None
-
-
-def get_genai_client():
-    global _genai_client
-    if _genai_client is None:
-        api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
-        if not api_key:
-            raise RuntimeError("GEMINI_API_KEY is not set.")
-        _genai_client = genai.Client(api_key=api_key)
-    return _genai_client
-
-
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
-
-
-class ScrapeRequest(BaseModel):
-    url: str = Field(..., max_length=2048)
-    length: Literal["short", "medium", "detailed"] = "medium"
-    bullets: int = Field(3, ge=1, le=7)
-
-
-class SummaryResponse(BaseModel):
-    id: int
-    title: str
-    url: str
-    summary: List[str]
-    length: str
-    bullets: int
-    is_pinned: bool
-    created_at: Optional[str] = None
-
-
-class ScrapeError(Exception):
-    pass
-
-
-# ---------------------------------------------------------------------------
-# Scraping Logic & SSRF Protection
-# ---------------------------------------------------------------------------
-def is_safe_url(url: str) -> bool:
-    try:
-        parsed = urlparse(url)
-        hostname = parsed.hostname
-        port = parsed.port or (443 if parsed.scheme == "https" else 80)
-    except ValueError:
-        return False
-
-    if parsed.scheme not in ("http", "https") or not hostname:
-        return False
-
-    try:
-        infos = socket.getaddrinfo(hostname, port, proto=socket.IPPROTO_TCP)
-    except (socket.gaierror, UnicodeError):
-        return False
-
-    for info in infos:
-        address = info[4][0].split("%")[0]
-        ip = ipaddress.ip_address(address)
-        if ip.version == 6 and ip.ipv4_mapped:
-            ip = ip.ipv4_mapped
-        if not ip.is_global:
-            return False
-    return True
-
-
-def fetch_page(url: str) -> bytes:
-    current = url
-
-    for _ in range(MAX_REDIRECTS + 1):
-        if not is_safe_url(current):
-            raise ScrapeError(
-                "That address isn't allowed. Please provide a public http(s) link."
-            )
-
-        response = requests.get(
-            current,
-            headers=REQUEST_HEADERS,
-            timeout=8,
-            allow_redirects=False,
-            stream=True,
-        )
+    def override_get_db():
+        db = TestSession()
         try:
-            if response.is_redirect:
-                location = response.headers.get("Location")
-                if not location:
-                    raise ScrapeError("The site returned an invalid redirect.")
-                current = urljoin(current, location)
-                if not is_safe_url(current):
-                    raise ScrapeError("That redirect target isn't allowed.")
-                continue
-
-            response.raise_for_status()
-
-            chunks, size = [], 0
-            for chunk in response.iter_content(65536):
-                chunks.append(chunk)
-                size += len(chunk)
-                if size > MAX_DOWNLOAD_BYTES:
-                    break
-            return b"".join(chunks)
+            yield db
         finally:
-            response.close()
+            db.close()
 
-    raise ScrapeError("Too many redirects.")
-
-
-def extract_article_data(url: str) -> dict:
-    try:
-        raw_content = fetch_page(url)
-    except ScrapeError:
-        raise
-    except requests.exceptions.Timeout:
-        raise ScrapeError("Request took too long to load.")
-    except requests.exceptions.HTTPError as e:
-        status_code = getattr(getattr(e, "response", None), "status_code", "unknown")
-        raise ScrapeError(f"Site returned HTTP {status_code} error.")
-    except requests.exceptions.RequestException as e:
-        raise ScrapeError(f"Failed to fetch target page: {e}")
-
-    if isinstance(raw_content, bytes):
-        html_text = raw_content.decode("utf-8", errors="replace")
-    else:
-        html_text = str(raw_content)
-
-    soup = BeautifulSoup(html_text, "html.parser")
-
-    h1 = soup.find("h1")
-    title_text = h1.get_text(strip=True) if h1 and h1.get_text(strip=True) else None
-
-    if not title_text:
-        h2 = soup.find("h2")
-        title_text = h2.get_text(strip=True) if h2 and h2.get_text(strip=True) else None
-
-    if not title_text:
-        title_tag = soup.find("title")
-        title_text = (
-            title_tag.get_text(strip=True)
-            if title_tag and title_tag.get_text(strip=True)
-            else None
-        )
-
-    if not title_text:
-        title_text = "Article Summary"
-
-    paragraphs = []
-    for region in (soup.find("article"), soup.find("main")):
-        if region is not None:
-            paragraphs = [
-                p.get_text(strip=True)
-                for p in region.find_all("p")
-                if len(p.get_text(strip=True)) > 30
-            ]
-            if sum(len(p) for p in paragraphs) > 200:
-                break
-    if sum(len(p) for p in paragraphs) <= 200:
-        paragraphs = [
-            p.get_text(strip=True)
-            for p in soup.find_all("p")
-            if len(p.get_text(strip=True)) > 30
-        ]
-
-    body = "\n\n".join(paragraphs).strip()
-    if not body:
-        raise ScrapeError("Could not extract readable article text from this site.")
-
-    return {"title": title_text, "body": body[:MAX_ARTICLE_CHARS]}
+    main.app.dependency_overrides[main.get_db] = override_get_db
+    main.limiter.enabled = False
+    yield TestClient(main.app)
+    main.app.dependency_overrides.clear()
+    main.limiter.enabled = True
 
 
-# ---------------------------------------------------------------------------
-# LLM Processing
-# ---------------------------------------------------------------------------
-BULLET_RE = re.compile(r"^\s*(?:[-*•]|\d+[.)])\s*")
+def post(client, **overrides):
+    payload = {
+        "url": "https://example.com/a",
+        "length": "medium",
+        "bullets": 2,
+    }
+    payload.update(overrides)
+    return client.post("/scrape", json=payload)
 
 
-def parse_bullets(text_content: str, limit: int) -> list:
-    cleaned = []
-    for line in text_content.strip().splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        # Strip leading bullet/numbered point marker if present
-        line = BULLET_RE.sub("", line).strip()
-        # Remove markdown bold formatting
-        line = line.replace("**", "").strip()
-        if line:
-            cleaned.append(line)
-    return cleaned[:limit]
+# ---- endpoint behaviour ---------------------------------------------------
+def test_successful_summary_is_returned_and_saved(client):
+    with (
+        patch.object(main, "extract_article_data", return_value=ARTICLE),
+        patch.object(main, "generate_summary", return_value=["Point A", "Point B"]),
+    ):
+        response = post(client)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["title"] == "Test Article"
+    assert body["summary"] == ["Point A", "Point B"]
+
+    history = client.get("/history").json()
+    assert len(history) == 1
+    assert history[0]["summary"] == ["Point A", "Point B"]
 
 
-def generate_summary(article_text: str, length: str, bullets: int):
-    prompt = (
-        "You are an expert research analyst. Analyze the following article text "
-        f"and extract exactly {bullets} core insights.\n\n"
-        f"The target depth of each insight should be {length.upper()}.\n"
-        "- If SHORT: Keep each bullet extremely concise and snappy.\n"
-        "- If MEDIUM: Provide balanced, clear sentences with context.\n"
-        "- If DETAILED: Provide rich, multi-sentence explanations with depth.\n\n"
-        "Do not include any introductory or concluding text. Return your response\n"
-        "strictly as bullet points, one per line, each starting with '- '.\n\n"
-        f"Article Text:\n{article_text}"
+def test_rejects_non_http_url(client):
+    response = post(client, url="ftp://example.com/file")
+    assert response.status_code == 400
+    assert "Invalid URL format" in response.json()["detail"]
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://127.0.0.1:8000/admin",
+        "http://169.254.169.254/latest/meta-data",
+        "http://10.0.0.5/internal",
+        "http://[::1]/",
+    ],
+)
+def test_blocks_private_and_internal_addresses(client, url):
+    response = post(client, url=url)
+    assert response.status_code == 400
+    assert "isn't allowed" in response.json()["detail"]
+
+
+@pytest.mark.parametrize(
+    "overrides", [{"bullets": 500}, {"bullets": 0}, {"length": "huge"}]
+)
+def test_rejects_out_of_range_options(client, overrides):
+    assert post(client, **overrides).status_code == 422
+
+
+def test_extraction_failure_returns_400(client):
+    error = main.ScrapeError(
+        "Could not extract readable main content from this website."
     )
-
-    client = get_genai_client()
-    try:
-        response = client.models.generate_content(model=GEMINI_MODEL, contents=prompt)
-        if response.text:
-            return parse_bullets(response.text, bullets)
-    except Exception as e:
-        print(f"Error calling {GEMINI_MODEL}: {e}")
-    return None
+    with patch.object(main, "extract_article_data", side_effect=error):
+        response = post(client)
+    assert response.status_code == 400
+    assert "Could not extract" in response.json()["detail"]
 
 
-# ---------------------------------------------------------------------------
-# API Routes
-# ---------------------------------------------------------------------------
-@app.post("/scrape", response_model=SummaryResponse)
-@limiter.limit(RATE_LIMIT)
-def scrape_endpoint(
-    input_data: ScrapeRequest, request: Request, db: Session = Depends(get_db)
-):
-    target_url = input_data.url.strip()
-    if not target_url.startswith(("http://", "https://")):
-        raise HTTPException(
-            status_code=400,
-            detail="Invalid URL format. Must start with http:// or https://",
-        )
+def test_ai_failure_returns_500(client):
+    with (
+        patch.object(main, "extract_article_data", return_value=ARTICLE),
+        patch.object(main, "generate_summary", return_value=None),
+    ):
+        response = post(client)
+    assert response.status_code == 500
 
-    try:
-        scraped = extract_article_data(target_url)
-    except ScrapeError as e:
-        raise HTTPException(status_code=400, detail=str(e))
 
-    summary_bullets = generate_summary(
-        article_text=scraped["body"],
-        length=input_data.length,
-        bullets=input_data.bullets,
-    )
-    if not summary_bullets:
-        raise HTTPException(
-            status_code=500,
-            detail=(
-                "The AI service was unable to generate a summary. "
-                "Please try another article link."
-            ),
-        )
+def test_rate_limit_returns_429(client):
+    main.limiter.enabled = True
+    main.limiter.reset()
+    with (
+        patch.object(main, "extract_article_data", return_value=ARTICLE),
+        patch.object(main, "generate_summary", return_value=["Point A"]),
+    ):
+        statuses = [post(client).status_code for _ in range(6)]
+    assert statuses[:5] == [200] * 5
+    assert statuses[5] == 429
 
-    chat_title = scraped["title"]
 
-    try:
-        db_summary = Summary(
-            user_email="guest",
-            title=chat_title,
-            url=target_url,
-            summary="\n".join(summary_bullets),
-            length=input_data.length,
-            bullets=input_data.bullets,
-            is_pinned=False,
-        )
-        db.add(db_summary)
-        db.commit()
-        db.refresh(db_summary)
-    except SQLAlchemyError as err:
-        db.rollback()
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Database commit error: {str(getattr(err, 'orig', err))}",
-        )
+# ---- extraction pipeline --------------------------------------------------
+def test_extract_filters_short_paragraphs_and_finds_title():
+    html = f"<h1>My Title</h1><p>short</p><p>{LONG_P}</p>"
+    with (
+        patch.object(main, "is_safe_url", return_value=True),
+        patch.object(main.requests, "get", return_value=FakeResponse(html)),
+    ):
+        result = main.extract_article_data("https://example.com")
+    assert result["title"] == "My Title"
+    assert "short" not in result["body"]
+    assert LONG_P in result["body"]
 
-    return SummaryResponse(
-        id=db_summary.id,
-        title=db_summary.title,
-        url=db_summary.url,
-        summary=summary_bullets,
-        length=db_summary.length,
-        bullets=db_summary.bullets,
-        is_pinned=db_summary.is_pinned,
-        created_at=(
-            db_summary.created_at.isoformat() if db_summary.created_at else None
+
+def test_extract_raises_when_no_readable_content():
+    with (
+        patch.object(main, "is_safe_url", return_value=True),
+        patch.object(
+            main.requests, "get", return_value=FakeResponse("<h1>Hi</h1><p>tiny</p>")
         ),
-    )
+    ):
+        with pytest.raises(main.ScrapeError, match="Could not extract"):
+            main.extract_article_data("https://example.com")
 
 
-@app.get("/history", response_model=List[SummaryResponse])
-def get_history(limit: int = Query(50, ge=1, le=100), db: Session = Depends(get_db)):
-    summaries = (
-        db.query(Summary)
-        .order_by(Summary.is_pinned.desc(), Summary.created_at.desc())
-        .limit(limit)
-        .all()
+def test_extract_reports_timeouts_and_http_errors():
+    with patch.object(main, "is_safe_url", return_value=True):
+        timeout = requests.exceptions.Timeout
+        with patch.object(main.requests, "get", side_effect=timeout):
+            with pytest.raises(main.ScrapeError, match="too long"):
+                main.extract_article_data("https://example.com")
+
+        with patch.object(main.requests, "get", return_value=FakeResponse(status=403)):
+            with pytest.raises(main.ScrapeError, match="403"):
+                main.extract_article_data("https://example.com")
+
+
+def test_redirect_to_internal_address_is_blocked():
+    redirect = FakeResponse(status=302, headers={"Location": "http://127.0.0.1/secret"})
+    with (
+        patch.object(main, "is_safe_url", side_effect=[True, False]),
+        patch.object(main.requests, "get", return_value=redirect),
+    ):
+        with pytest.raises(main.ScrapeError, match="isn't allowed"):
+            main.extract_article_data("https://example.com")
+
+
+# ---- bullet parsing -------------------------------------------------------
+def test_parse_bullets_strips_markers_but_keeps_leading_digits():
+    text_sample = (
+        "- 5G networks grew fast\n**Bold** insight\n1. Numbered point\n- \n\nExtra"
     )
-    return [
-        SummaryResponse(
-            id=s.id,
-            title=s.title,
-            url=s.url,
-            summary=s.summary.split("\n"),
-            length=s.length,
-            bullets=s.bullets,
-            is_pinned=s.is_pinned,
-            created_at=s.created_at.isoformat() if s.created_at else None,
-        )
-        for s in summaries
+    assert main.parse_bullets(text_sample, 3) == [
+        "5G networks grew fast",
+        "Bold insight",
+        "Numbered point",
     ]
 
 
-@app.patch("/history/{item_id}/pin", response_model=SummaryResponse)
-def toggle_pin(item_id: int, db: Session = Depends(get_db)):
-    record = db.query(Summary).filter(Summary.id == item_id).first()
-    if not record:
-        raise HTTPException(status_code=404, detail="Summary not found.")
-
-    record.is_pinned = not record.is_pinned
-    db.commit()
-    db.refresh(record)
-
-    return SummaryResponse(
-        id=record.id,
-        title=record.title,
-        url=record.url,
-        summary=record.summary.split("\n"),
-        length=record.length,
-        bullets=record.bullets,
-        is_pinned=record.is_pinned,
-        created_at=record.created_at.isoformat() if record.created_at else None,
-    )
-
-
-@app.delete("/history/{item_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_summary(item_id: int, db: Session = Depends(get_db)):
-    record = db.query(Summary).filter(Summary.id == item_id).first()
-    if not record:
-        raise HTTPException(status_code=404, detail="Summary not found.")
-
-    db.delete(record)
-    db.commit()
-    return None
-
-
-@app.get("/health")
-def health():
-    return {"status": "ok"}
-
-
-@app.get("/")
-def read_root():
-    return {"message": "Incite AI backend is running!"}
+def test_parse_bullets_falls_back_to_plain_lines():
+    result = main.parse_bullets("First line\nSecond line", 5)
+    assert result == ["First line", "Second line"]
