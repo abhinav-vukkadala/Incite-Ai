@@ -94,7 +94,8 @@ async def lifespan(app: FastAPI):
             if not DATABASE_URL.startswith("sqlite"):
                 conn.execute(
                     text(
-                        "ALTER TABLE summaries ADD COLUMN IF NOT EXISTS is_pinned BOOLEAN DEFAULT FALSE NOT NULL;"
+                        "ALTER TABLE summaries ADD COLUMN IF NOT EXISTS "
+                        "is_pinned BOOLEAN DEFAULT FALSE NOT NULL;"
                     )
                 )
                 conn.commit()
@@ -225,7 +226,6 @@ def fetch_page(url: str) -> bytes:
                 "That address isn't allowed. Please provide a public http(s) link."
             )
 
-        # Must use requests.get directly so test patch.object(main.requests, "get") works
         response = requests.get(
             current,
             headers=REQUEST_HEADERS,
@@ -278,16 +278,13 @@ def extract_article_data(url: str) -> dict:
 
     soup = BeautifulSoup(html_text, "html.parser")
 
-    # Priority 1: h1 tag
     h1 = soup.find("h1")
     title_text = h1.get_text(strip=True) if h1 and h1.get_text(strip=True) else None
 
-    # Priority 2: h2 tag
     if not title_text:
         h2 = soup.find("h2")
         title_text = h2.get_text(strip=True) if h2 and h2.get_text(strip=True) else None
 
-    # Priority 3: title tag
     if not title_text:
         title_tag = soup.find("title")
         title_text = (
@@ -299,7 +296,6 @@ def extract_article_data(url: str) -> dict:
     if not title_text:
         title_text = "Article Summary"
 
-    # Only include paragraphs strictly longer than 30 characters
     paragraphs = []
     for region in (soup.find("article"), soup.find("main")):
         if region is not None:
@@ -327,15 +323,22 @@ def extract_article_data(url: str) -> dict:
 # ---------------------------------------------------------------------------
 # LLM Processing
 # ---------------------------------------------------------------------------
-BULLET_RE = re.compile(r"^\s*(?:[-*•]|\d+[.)])\s+")
+BULLET_RE = re.compile(r"^\s*(?:[-*•]|\d+[.)])\s*")
 
 
-def parse_bullets(text: str, limit: int) -> list:
-    lines = [line.strip() for line in text.strip().splitlines() if line.strip()]
-    marked = [BULLET_RE.sub("", line) for line in lines if BULLET_RE.match(line)]
-    points = marked or lines
-    points = [p.replace("**", "").strip() for p in points]
-    return [p for p in points if p][:limit]
+def parse_bullets(text_content: str, limit: int) -> list:
+    cleaned = []
+    for line in text_content.strip().splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        # Strip leading bullet/numbered point marker if present
+        line = BULLET_RE.sub("", line).strip()
+        # Remove markdown bold formatting
+        line = line.replace("**", "").strip()
+        if line:
+            cleaned.append(line)
+    return cleaned[:limit]
 
 
 def generate_summary(article_text: str, length: str, bullets: int):
@@ -343,11 +346,11 @@ def generate_summary(article_text: str, length: str, bullets: int):
         "You are an expert research analyst. Analyze the following article text "
         f"and extract exactly {bullets} core insights.\n\n"
         f"The target depth of each insight should be {length.upper()}.\n"
-        "- If SHORT: Keep each bullet extremely concise, snappy, and under one sentence.\n"
-        "- If MEDIUM: Provide balanced, clear sentences packed with structural context.\n"
-        "- If DETAILED: Provide rich, multi-sentence explanations full of nuance, metrics, and technical depth.\n\n"
-        "Do not include any introductory or concluding text. Return your response strictly "
-        "as bullet points, one per line, each starting with '- '.\n\n"
+        "- If SHORT: Keep each bullet extremely concise and snappy.\n"
+        "- If MEDIUM: Provide balanced, clear sentences with context.\n"
+        "- If DETAILED: Provide rich, multi-sentence explanations with depth.\n\n"
+        "Do not include any introductory or concluding text. Return your response\n"
+        "strictly as bullet points, one per line, each starting with '- '.\n\n"
         f"Article Text:\n{article_text}"
     )
 
@@ -389,10 +392,12 @@ def scrape_endpoint(
     if not summary_bullets:
         raise HTTPException(
             status_code=500,
-            detail="The AI service was unable to generate a summary. Please try another article link.",
+            detail=(
+                "The AI service was unable to generate a summary. "
+                "Please try another article link."
+            ),
         )
 
-    # Use the extracted title directly so the test assertion passes
     chat_title = scraped["title"]
 
     try:
@@ -423,7 +428,9 @@ def scrape_endpoint(
         length=db_summary.length,
         bullets=db_summary.bullets,
         is_pinned=db_summary.is_pinned,
-        created_at=db_summary.created_at.isoformat() if db_summary.created_at else None,
+        created_at=(
+            db_summary.created_at.isoformat() if db_summary.created_at else None
+        ),
     )
 
 
@@ -474,4 +481,20 @@ def toggle_pin(item_id: int, db: Session = Depends(get_db)):
 
 @app.delete("/history/{item_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_summary(item_id: int, db: Session = Depends(get_db)):
-    record = db.query(Summary).filter
+    record = db.query(Summary).filter(Summary.id == item_id).first()
+    if not record:
+        raise HTTPException(status_code=404, detail="Summary not found.")
+
+    db.delete(record)
+    db.commit()
+    return None
+
+
+@app.get("/health")
+def health():
+    return {"status": "ok"}
+
+
+@app.get("/")
+def read_root():
+    return {"message": "Incite AI backend is running!"}
