@@ -243,17 +243,6 @@ def fetch_page(url: str) -> bytes:
                     raise ScrapeError("That redirect target isn't allowed.")
                 continue
 
-            if response.status_code in (401, 403):
-                raise ScrapeError(
-                    "Unable to summarize this article because automated scrapers "
-                    "are blocked by this website."
-                )
-            if response.status_code == 429:
-                raise ScrapeError(
-                    "The website is rate limiting requests. Please try again "
-                    "in a few moments."
-                )
-
             response.raise_for_status()
 
             chunks, size = [], 0
@@ -278,11 +267,6 @@ def extract_article_data(url: str) -> dict:
         raise ScrapeError("Request took too long to load.")
     except requests.exceptions.HTTPError as e:
         status_code = getattr(getattr(e, "response", None), "status_code", "unknown")
-        if status_code in (401, 403):
-            raise ScrapeError(
-                "Unable to summarize this article because automated scrapers "
-                "are blocked by this website."
-            )
         raise ScrapeError(f"Site returned HTTP {status_code} error.")
     except requests.exceptions.RequestException as e:
         raise ScrapeError(f"Failed to fetch target page: {e}")
@@ -339,15 +323,25 @@ def extract_article_data(url: str) -> dict:
 # ---------------------------------------------------------------------------
 # LLM Processing
 # ---------------------------------------------------------------------------
-BULLET_RE = re.compile(r"^\s*(?:[-*•]|\d+[.)])\s+")
+# Strict regex: matches bullet dashes/bullets OR numbered lists like "1. " or "1) "
+# It requires whitespace AFTER the marker so "5G" is not matched.
+BULLET_PREFIX_RE = re.compile(r"^\s*(?:[-*•]|\d+[.)])\s+")
 
 
 def parse_bullets(text_content: str, limit: int) -> list:
-    lines = [line.strip() for line in text_content.strip().splitlines() if line.strip()]
-    marked = [BULLET_RE.sub("", line) for line in lines if BULLET_RE.match(line)]
-    points = marked or lines
-    points = [p.replace("**", "").strip() for p in points]
-    return [p for p in points if p][:limit]
+    cleaned = []
+    for line in text_content.strip().splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        # Strip leading marker if line is prefixed by a bullet or list number
+        line = BULLET_PREFIX_RE.sub("", line).strip()
+        # Remove bold formatting
+        line = line.replace("**", "").strip()
+        # Ignore empty lines that were just a standalone bullet marker like "- "
+        if line:
+            cleaned.append(line)
+    return cleaned[:limit]
 
 
 def generate_summary(article_text: str, length: str, bullets: int):
