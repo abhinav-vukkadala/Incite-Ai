@@ -4,13 +4,13 @@ import re
 import socket
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from typing import Literal
+from typing import List, Literal, Optional
 from urllib.parse import urljoin, urlparse
 
 import requests
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from google import genai
 from google.genai.errors import APIError
@@ -18,7 +18,17 @@ from pydantic import BaseModel, Field
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
-from sqlalchemy import Column, DateTime, Integer, String, Text, create_engine
+from sqlalchemy import (
+    Boolean,
+    Column,
+    DateTime,
+    Integer,
+    String,
+    Text,
+    create_engine,
+    text,
+)
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, declarative_base, sessionmaker
 
 load_dotenv()
@@ -27,51 +37,72 @@ load_dotenv()
 # Configuration
 # ---------------------------------------------------------------------------
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
-RATE_LIMIT = os.getenv("RATE_LIMIT", "5/minute")
+RATE_LIMIT = os.getenv("RATE_LIMIT", "15/minute")
 MAX_REDIRECTS = 5
-MAX_DOWNLOAD_BYTES = 2_000_000  # stop reading a page after ~2 MB
-MAX_ARTICLE_CHARS = 8000  # amount of article text sent to the model
+MAX_ARTICLE_CHARS = 7500
 
+# Standard browser headers (WITHOUT manual Accept-Encoding so requests auto-decompresses)
 REQUEST_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/120.0.0.0 Safari/537.36"
-    )
+        "Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Connection": "keep-alive",
 }
 
 # ---------------------------------------------------------------------------
-# Database setup (+ Render's 'postgres://' compatibility fix)
+# Database Setup
 # ---------------------------------------------------------------------------
-DEFAULT_DB = "postgresql://postgres:YOUR_PASSWORD@localhost:5432/inciteai"
-DATABASE_URL = os.getenv("DATABASE_URL", DEFAULT_DB)
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./incite.db")
 if DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 
-engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+engine_kwargs = {"pool_pre_ping": True}
+if DATABASE_URL.startswith("sqlite"):
+    engine_kwargs["connect_args"] = {"check_same_thread": False}
+
+engine = create_engine(DATABASE_URL, **engine_kwargs)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
 
 class Summary(Base):
     __tablename__ = "summaries"
+
     id = Column(Integer, primary_key=True, index=True)
-    user_email = Column(String, nullable=False)
-    title = Column(String, nullable=False)
-    url = Column(String, nullable=False)
+    user_email = Column(String(255), default="guest", nullable=False)
+    title = Column(String(512), nullable=False)
+    url = Column(String(2048), nullable=False)
     summary = Column(Text, nullable=False)
-    length = Column(String, nullable=False)
+    length = Column(String(50), nullable=False)
     bullets = Column(Integer, nullable=False)
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    is_pinned = Column(Boolean, default=False, nullable=False)
+    created_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     try:
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+            if not DATABASE_URL.startswith("sqlite"):
+                conn.execute(
+                    text(
+                        "ALTER TABLE summaries ADD COLUMN IF NOT EXISTS is_pinned BOOLEAN DEFAULT FALSE NOT NULL;"
+                    )
+                )
+                conn.commit()
         Base.metadata.create_all(bind=engine)
-        print("Connected to database and tables verified.")
-    except Exception as e:  # the app still works without the DB
-        print(f"Warning: Database startup check failed: {e}")
+        print("Database connected and schema verified.")
+    except Exception as e:
+        print(f"Database warning: {e}")
     yield
 
 
@@ -79,7 +110,7 @@ app = FastAPI(lifespan=lifespan)
 
 
 # ---------------------------------------------------------------------------
-# Rate limiting (per client IP; honours X-Forwarded-For behind Render/Vercel)
+# Rate Limiting & CORS
 # ---------------------------------------------------------------------------
 def client_ip(request: Request) -> str:
     forwarded = request.headers.get("x-forwarded-for")
@@ -92,9 +123,6 @@ limiter = Limiter(key_func=client_ip)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
-# ---------------------------------------------------------------------------
-# CORS (local dev + production frontend + Vercel preview deployments)
-# ---------------------------------------------------------------------------
 allowed_origins = [
     "http://localhost:5173",
     "http://localhost:3000",
@@ -117,7 +145,7 @@ app.add_middleware(
 )
 
 # ---------------------------------------------------------------------------
-# Gemini client (created lazily so importing the module never needs an API key)
+# Gemini Client
 # ---------------------------------------------------------------------------
 _genai_client = None
 
@@ -125,7 +153,10 @@ _genai_client = None
 def get_genai_client():
     global _genai_client
     if _genai_client is None:
-        _genai_client = genai.Client()
+        api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+        if not api_key:
+            raise RuntimeError("GEMINI_API_KEY is not set.")
+        _genai_client = genai.Client(api_key=api_key)
     return _genai_client
 
 
@@ -143,12 +174,23 @@ class ScrapeRequest(BaseModel):
     bullets: int = Field(3, ge=1, le=7)
 
 
+class SummaryResponse(BaseModel):
+    id: int
+    title: str
+    url: str
+    summary: List[str]
+    length: str
+    bullets: int
+    is_pinned: bool
+    created_at: Optional[str] = None
+
+
 class ScrapeError(Exception):
-    """A problem fetching or reading the article, safe to show to the user."""
+    pass
 
 
 # ---------------------------------------------------------------------------
-# SSRF protection: only fetch public internet addresses
+# Scraping Logic (Clean Text Extraction)
 # ---------------------------------------------------------------------------
 def is_safe_url(url: str) -> bool:
     try:
@@ -171,96 +213,83 @@ def is_safe_url(url: str) -> bool:
         ip = ipaddress.ip_address(address)
         if ip.version == 6 and ip.ipv4_mapped:
             ip = ip.ipv4_mapped
-        if not ip.is_global:  # loopback, private, link-local, reserved...
+        if not ip.is_global:
             return False
     return True
 
 
-# ---------------------------------------------------------------------------
-# Article extraction
-# ---------------------------------------------------------------------------
-def fetch_page(url: str) -> bytes:
-    """GET a page, validating every redirect hop against the SSRF check."""
+def fetch_page(url: str) -> str:
     current = url
+    session = requests.Session()
+    session.headers.update(REQUEST_HEADERS)
+
     for _ in range(MAX_REDIRECTS + 1):
         if not is_safe_url(current):
-            raise ScrapeError(
-                "That URL isn't allowed. Please use a public http(s) article link."
-            )
-        response = requests.get(
-            current,
-            headers=REQUEST_HEADERS,
-            timeout=10,
-            allow_redirects=False,
-            stream=True,
-        )
+            raise ScrapeError("URL is not allowed. Please enter a public web link.")
+
+        response = session.get(current, timeout=8, allow_redirects=False)
         try:
             if response.is_redirect:
                 location = response.headers.get("Location")
                 if not location:
-                    raise ScrapeError("The site returned a broken redirect.")
+                    raise ScrapeError("Invalid redirect from target website.")
                 current = urljoin(current, location)
                 continue
 
+            if response.status_code in (401, 403):
+                raise ScrapeError(
+                    "Unable to summarize this article because automated scrapers are blocked by this website."
+                )
+            if response.status_code == 429:
+                raise ScrapeError(
+                    "The website is rate limiting requests. Please try again in a few moments."
+                )
+
             response.raise_for_status()
 
-            chunks, size = [], 0
-            for chunk in response.iter_content(65536):
-                chunks.append(chunk)
-                size += len(chunk)
-                if size > MAX_DOWNLOAD_BYTES:
-                    break
-            return b"".join(chunks)
+            # Using response.text lets requests automatically handle encoding and gzip decompression
+            return response.text
         finally:
             response.close()
 
-    raise ScrapeError("The site redirected too many times.")
+    raise ScrapeError("Too many redirects.")
 
 
 def extract_article_data(url: str) -> dict:
-    try:
-        html = fetch_page(url)
-    except ScrapeError:
-        raise
-    except requests.exceptions.Timeout:
-        raise ScrapeError("The site took too long to respond.")
-    except requests.exceptions.HTTPError as e:
-        status = e.response.status_code if e.response is not None else "unknown"
-        raise ScrapeError(
-            f"The site returned an error ({status}). Some sites block automated "
-            "access, so try a different article."
-        )
-    except requests.exceptions.RequestException:
-        raise ScrapeError("Could not fetch that page.")
-
-    soup = BeautifulSoup(html, "html.parser")
+    html_text = fetch_page(url)
+    soup = BeautifulSoup(html_text, "html.parser")
 
     title_tag = soup.find("h1") or soup.find("h2") or soup.find("title")
-    title_text = title_tag.get_text(strip=True) if title_tag else "Untitled Article"
+    title_text = title_tag.get_text(strip=True) if title_tag else "Article Summary"
 
-    def good_paragraphs(root):
-        texts = (p.get_text(strip=True) for p in root.find_all("p"))
-        return [t for t in texts if len(t) > 30]  # drop share buttons, footers...
-
-    # Prefer the main article region, fall back to the whole page.
     paragraphs = []
     for region in (soup.find("article"), soup.find("main")):
         if region is not None:
-            paragraphs = good_paragraphs(region)
-            if sum(len(p) for p in paragraphs) > 500:
+            paragraphs = [
+                p.get_text(strip=True)
+                for p in region.find_all("p")
+                if len(p.get_text(strip=True)) > 30
+            ]
+            if sum(len(p) for p in paragraphs) > 400:
                 break
-    if sum(len(p) for p in paragraphs) <= 500:
-        paragraphs = good_paragraphs(soup)
+    if sum(len(p) for p in paragraphs) <= 400:
+        paragraphs = [
+            p.get_text(strip=True)
+            for p in soup.find_all("p")
+            if len(p.get_text(strip=True)) > 30
+        ]
 
     body = "\n\n".join(paragraphs)[:MAX_ARTICLE_CHARS]
     if not body.strip():
-        raise ScrapeError("Could not extract readable main content from this website.")
+        raise ScrapeError(
+            "Could not extract readable article text. The website content may be dynamically rendered or protected by a paywall."
+        )
 
     return {"title": title_text, "body": body}
 
 
 # ---------------------------------------------------------------------------
-# Summarisation
+# LLM Processing
 # ---------------------------------------------------------------------------
 BULLET_RE = re.compile(r"^\s*(?:[-*•]|\d+[.)])\s+")
 
@@ -274,48 +303,45 @@ def parse_bullets(text: str, limit: int) -> list:
 
 
 def generate_summary(article_text: str, length: str, bullets: int):
-    if not article_text.strip():
-        return None
     prompt = (
-        "You are an expert research analyst. Analyze the following "
-        f"article text and extract exactly {bullets} core insights.\n\n"
+        "You are an expert research analyst. Analyze the following article text "
+        f"and extract exactly {bullets} core insights.\n\n"
         f"The target depth of each insight should be {length.upper()}.\n"
-        "- If SHORT: Keep each bullet extremely concise, snappy, and "
-        "under one sentence.\n"
-        "- If MEDIUM: Provide balanced, clear sentences packed with "
-        "structural context.\n"
-        "- If DETAILED: Provide rich, multi-sentence explanations full "
-        "of nuance, metrics, and technical depth.\n\n"
-        "Do not include any introductory or concluding text. Return your "
-        "response strictly as bullet points, one per line, each starting "
-        "with '- '.\n\n"
+        "- If SHORT: Keep each bullet extremely concise, snappy, and under one sentence.\n"
+        "- If MEDIUM: Provide balanced, clear sentences packed with structural context.\n"
+        "- If DETAILED: Provide rich, multi-sentence explanations full of nuance, metrics, and technical depth.\n\n"
+        "Do not include any introductory or concluding text. Return your response strictly "
+        "as bullet points, one per line, each starting with '- '.\n\n"
         f"Article Text:\n{article_text}"
     )
+
+    client = get_genai_client()
     try:
-        response = get_genai_client().models.generate_content(
-            model=GEMINI_MODEL, contents=prompt
-        )
-        if not response.text:
-            return None
-        return parse_bullets(response.text, bullets) or None
-    except APIError as e:
-        print(f"Gemini API Error: {e}")
-        return None
+        response = client.models.generate_content(model=GEMINI_MODEL, contents=prompt)
+        if response.text:
+            return parse_bullets(response.text, bullets)
     except Exception as e:
-        print(f"Unexpected AI layer error: {e}")
-        return None
+        print(f"Error calling {GEMINI_MODEL}: {e}")
+    return None
+
+
+def clean_chat_title(raw_title: str) -> str:
+    cleaned = re.sub(r"\s*[-|•–—].*$", "", raw_title).strip()
+    words = cleaned.split()
+    if len(words) > 7:
+        return " ".join(words[:6]) + "..."
+    return cleaned or "Article Summary"
 
 
 # ---------------------------------------------------------------------------
-# Routes
+# API Routes
 # ---------------------------------------------------------------------------
-@app.post("/scrape")
+@app.post("/scrape", response_model=SummaryResponse)
 @limiter.limit(RATE_LIMIT)
 def scrape_endpoint(
     input_data: ScrapeRequest, request: Request, db: Session = Depends(get_db)
 ):
     target_url = input_data.url.strip()
-
     if not target_url.startswith(("http://", "https://")):
         raise HTTPException(
             status_code=400,
@@ -335,52 +361,97 @@ def scrape_endpoint(
     if not summary_bullets:
         raise HTTPException(
             status_code=500,
-            detail="The AI service was unable to generate a summary.",
+            detail="The AI service was unable to generate a summary. Please try another article link.",
         )
 
-    # Saving history must never break a successful summary.
-    summary_id = None
+    chat_title = clean_chat_title(scraped["title"])
+
     try:
         db_summary = Summary(
             user_email="guest",
-            title=scraped["title"],
+            title=chat_title,
             url=target_url,
             summary="\n".join(summary_bullets),
             length=input_data.length,
             bullets=input_data.bullets,
+            is_pinned=False,
         )
         db.add(db_summary)
         db.commit()
         db.refresh(db_summary)
-        summary_id = db_summary.id
-    except Exception as e:
+    except SQLAlchemyError as err:
         db.rollback()
-        print(f"Warning: could not save summary to database: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Database commit error: {str(getattr(err, 'orig', err))}",
+        )
 
-    return {
-        "id": summary_id,
-        "title": scraped["title"],
-        "url": target_url,
-        "summary": summary_bullets,
-    }
+    return SummaryResponse(
+        id=db_summary.id,
+        title=db_summary.title,
+        url=db_summary.url,
+        summary=summary_bullets,
+        length=db_summary.length,
+        bullets=db_summary.bullets,
+        is_pinned=db_summary.is_pinned,
+        created_at=db_summary.created_at.isoformat() if db_summary.created_at else None,
+    )
 
 
-@app.get("/history")
-def get_history(limit: int = Query(10, ge=1, le=50), db: Session = Depends(get_db)):
-    """Fetch recent summaries stored in the database."""
-    summaries = db.query(Summary).order_by(Summary.created_at.desc()).limit(limit).all()
+@app.get("/history", response_model=List[SummaryResponse])
+def get_history(limit: int = Query(50, ge=1, le=100), db: Session = Depends(get_db)):
+    summaries = (
+        db.query(Summary)
+        .order_by(Summary.is_pinned.desc(), Summary.created_at.desc())
+        .limit(limit)
+        .all()
+    )
     return [
-        {
-            "id": s.id,
-            "title": s.title,
-            "url": s.url,
-            "summary": s.summary.split("\n"),
-            "length": s.length,
-            "bullets": s.bullets,
-            "created_at": s.created_at.isoformat() if s.created_at else None,
-        }
+        SummaryResponse(
+            id=s.id,
+            title=s.title,
+            url=s.url,
+            summary=s.summary.split("\n"),
+            length=s.length,
+            bullets=s.bullets,
+            is_pinned=s.is_pinned,
+            created_at=s.created_at.isoformat() if s.created_at else None,
+        )
         for s in summaries
     ]
+
+
+@app.patch("/history/{item_id}/pin", response_model=SummaryResponse)
+def toggle_pin(item_id: int, db: Session = Depends(get_db)):
+    record = db.query(Summary).filter(Summary.id == item_id).first()
+    if not record:
+        raise HTTPException(status_code=404, detail="Summary not found.")
+
+    record.is_pinned = not record.is_pinned
+    db.commit()
+    db.refresh(record)
+
+    return SummaryResponse(
+        id=record.id,
+        title=record.title,
+        url=record.url,
+        summary=record.summary.split("\n"),
+        length=record.length,
+        bullets=record.bullets,
+        is_pinned=record.is_pinned,
+        created_at=record.created_at.isoformat() if record.created_at else None,
+    )
+
+
+@app.delete("/history/{item_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_summary(item_id: int, db: Session = Depends(get_db)):
+    record = db.query(Summary).filter(Summary.id == item_id).first()
+    if not record:
+        raise HTTPException(status_code=404, detail="Summary not found.")
+
+    db.delete(record)
+    db.commit()
+    return None
 
 
 @app.get("/health")

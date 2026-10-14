@@ -1,566 +1,444 @@
 import React, { useState, useEffect } from "react";
 
-// Set VITE_API_URL in your hosting provider (e.g. Vercel) to your deployed backend,
-// like https://your-backend.onrender.com. Falls back to localhost for local dev.
 const API_URL = (
-  import.meta.env.VITE_API_URL || "http://localhost:8000"
+  import.meta.env.VITE_API_URL ||
+  import.meta.env.VITE_API_BASE_URL ||
+  "http://localhost:8000"
 ).replace(/\/$/, "");
 
-const HISTORY_KEY = "incite_ai_history";
-const MAX_HISTORY = 50;
-
-function getDomain(url) {
-  try {
-    return new URL(url).hostname.replace(/^www\./, "");
-  } catch {
-    return "";
-  }
-}
-
-function getErrorMessage(status, data) {
-  if (status === 429) {
-    return "Rate limit reached (5 requests per minute). Please wait a moment and try again.";
-  }
-  if (typeof data?.detail === "string") return data.detail;
-  if (status === 422) return "Please enter a valid article URL.";
-  return "Unable to scrape or summarize URL.";
-}
-
-function loadSavedHistory() {
-  try {
-    const saved = localStorage.getItem(HISTORY_KEY);
-    const parsed = saved ? JSON.parse(saved) : [];
-    return Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return [];
-  }
-}
-
-function saveHistory(items) {
-  try {
-    localStorage.setItem(HISTORY_KEY, JSON.stringify(items));
-  } catch {
-    // Storage can be full or blocked; the app keeps working without it.
-  }
-}
-
-function App() {
-  const [url, setUrl] = useState("");
-  const [loading, setLoading] = useState(false);
-  const [summary, setSummary] = useState([]);
-  const [title, setTitle] = useState("");
-  const [error, setError] = useState("");
-  const [length, setLength] = useState("medium"); // short, medium, detailed
-  const [bullets, setBullets] = useState(5);
-  const [copied, setCopied] = useState(false);
-
+export default function App() {
   const [history, setHistory] = useState([]);
+  const [activeChat, setActiveChat] = useState(null);
+  const [url, setUrl] = useState("");
+  const [length, setLength] = useState("medium");
+  const [bullets, setBullets] = useState(5);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [copiedId, setCopiedId] = useState(null);
 
-  // Load history on initial mount
   useEffect(() => {
-    setHistory(loadSavedHistory());
+    fetchHistory();
   }, []);
 
-  const lengthMapping = { 0: "short", 1: "medium", 2: "detailed" };
-  const reverseLengthMapping = { short: 0, medium: 1, detailed: 2 };
-
-  const updateHistory = (items) => {
-    setHistory(items);
-    saveHistory(items);
+  const fetchHistory = async () => {
+    try {
+      const res = await fetch(`${API_URL}/history?limit=50`);
+      if (res.ok) {
+        const data = await res.json();
+        setHistory(data);
+        if (data.length > 0 && !activeChat) {
+          setActiveChat(data[0]);
+        }
+      }
+    } catch (err) {
+      console.error("Failed to load history from database:", err);
+    }
   };
 
-  const handleScrape = async (e) => {
+  const handleSummarize = async (e) => {
     if (e) e.preventDefault();
-    const trimmedUrl = url.trim();
-    if (!trimmedUrl || loading) return;
+    const targetUrl = url.trim();
+    if (!targetUrl || loading) return;
 
-    setLoading(true);
     setError("");
+    setLoading(true);
 
     try {
-      const response = await fetch(`${API_URL}/scrape`, {
+      const res = await fetch(`${API_URL}/scrape`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url: trimmedUrl, length, bullets }),
+        body: JSON.stringify({
+          url: targetUrl,
+          length,
+          bullets: Number(bullets),
+        }),
       });
 
-      let data = {};
-      try {
-        data = await response.json();
-      } catch {
-        data = {};
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.detail || "Unable to summarize article.");
       }
 
-      if (!response.ok) {
-        throw new Error(getErrorMessage(response.status, data));
-      }
-
-      const articleTitle = data.title || "Research Document";
-      const articleSummary = data.summary || [];
-
-      setTitle(articleTitle);
-      setSummary(articleSummary);
-
-      const newItem = {
-        id: Date.now(),
-        title: articleTitle,
-        url: trimmedUrl,
-        summary: articleSummary,
-        date: new Date()
-          .toLocaleDateString("en-GB", { day: "numeric", month: "short" })
-          .toUpperCase(),
-        pinned: false,
-      };
-
-      updateHistory([newItem, ...history].slice(0, MAX_HISTORY));
+      setHistory((prev) => [data, ...prev]);
+      setActiveChat(data);
+      setUrl("");
     } catch (err) {
-      setError(
-        err instanceof TypeError
-          ? "Can't reach the server right now. Please try again in a moment."
-          : err.message,
-      );
+      setError(err.message || "Failed to reach backend.");
     } finally {
       setLoading(false);
     }
   };
 
-  const loadHistoryItem = (item) => {
-    setUrl(item.url);
-    setTitle(item.title);
-    setSummary(item.summary);
-    setError("");
-  };
-
-  const togglePin = (id, e) => {
-    if (e) e.stopPropagation();
-    updateHistory(
-      history.map((item) =>
-        item.id === id ? { ...item, pinned: !item.pinned } : item,
-      ),
-    );
-  };
-
-  const deleteHistoryItem = (id, e) => {
-    if (e) e.stopPropagation();
-    updateHistory(history.filter((item) => item.id !== id));
-  };
-
-  const clearAllHistory = () => {
-    if (
-      window.confirm("Are you sure you want to clear your research history?")
-    ) {
-      updateHistory([]);
-    }
-  };
-
-  const copyToClipboard = async (textToCopy) => {
+  const handleTogglePin = async (e, id) => {
+    e.stopPropagation();
     try {
-      await navigator.clipboard.writeText(textToCopy);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    } catch {
-      // Clipboard can be unavailable (e.g. insecure context); ignore.
+      const res = await fetch(`${API_URL}/history/${id}/pin`, {
+        method: "PATCH",
+      });
+      if (res.ok) {
+        const updated = await res.json();
+        setHistory((prev) =>
+          prev.map((item) => (item.id === id ? updated : item)),
+        );
+        if (activeChat?.id === id) setActiveChat(updated);
+      }
+    } catch (err) {
+      console.error("Failed to toggle pin:", err);
     }
   };
 
-  const handleNewSummary = () => {
-    setUrl("");
-    setTitle("");
-    setSummary([]);
-    setError("");
+  const handleDelete = async (e, id) => {
+    e.stopPropagation();
+    try {
+      const res = await fetch(`${API_URL}/history/${id}`, {
+        method: "DELETE",
+      });
+      if (res.ok) {
+        const updated = history.filter((item) => item.id !== id);
+        setHistory(updated);
+        if (activeChat?.id === id) {
+          setActiveChat(updated.length > 0 ? updated[0] : null);
+        }
+      }
+    } catch (err) {
+      console.error("Failed to delete chat:", err);
+    }
   };
 
-  const recent = history.slice(0, 6);
-  const pinnedCount = history.filter((item) => item.pinned).length;
-  const latest = history[0];
+  const handleCopy = (id, bulletsList) => {
+    navigator.clipboard.writeText(bulletsList.map((b) => `• ${b}`).join("\n"));
+    setCopiedId(id);
+    setTimeout(() => setCopiedId(null), 2000);
+  };
 
   return (
-    <div className="min-h-screen bg-[#faf9f8] text-[#1a1c1c] flex flex-col font-sans">
-      {/* TOP NAVBAR */}
-      <header className="sticky top-0 z-50 bg-[#faf9f8] border-b border-[#c2c8c0]/20">
-        <div className="flex justify-between items-center w-full px-8 py-3 mx-auto">
-          <div className="font-serif text-2xl font-bold tracking-tight text-[#1a1c1c]">
-            Incite AI
-          </div>
-          <nav className="flex items-center gap-8">
-            <a
-              className="text-sm font-semibold text-[#4a654f] border-b-2 border-[#4a654f] pb-1"
-              href="#workspace"
-            >
-              Summarize
-            </a>
-            <a
-              className="text-sm font-semibold text-[#424842] hover:text-[#4a654f] transition-colors"
-              href="#history"
-            >
-              History
-            </a>
-          </nav>
-        </div>
-      </header>
-
-      {/* THREE-COLUMN LAYOUT */}
-      <div className="flex h-[calc(100vh-57px)] w-full overflow-hidden">
-        {/* LEFT SIDEBAR */}
-        <aside className="hidden lg:flex flex-col h-full py-8 px-4 w-64 bg-[#f4f3f2] border-r border-[#c2c8c0]/20 shrink-0">
-          <div className="px-3 mb-6">
-            <h2 className="font-serif text-2xl font-bold text-[#1a1c1c] mb-1">
-              Recent Summaries
-            </h2>
-            <p className="text-xs text-[#424842]/70">
-              Your curated research journal
-            </p>
-          </div>
-
-          <nav className="flex flex-col gap-1.5 flex-grow overflow-y-auto">
-            {recent.length === 0 ? (
-              <p className="px-3 text-xs italic text-[#424842]/50">
-                Nothing here yet.
-              </p>
-            ) : (
-              recent.map((item) => (
-                <button
-                  key={item.id}
-                  type="button"
-                  onClick={() => loadHistoryItem(item)}
-                  className="flex items-center gap-3 text-left text-[#424842] p-3 rounded-xl hover:bg-[#e3e2e1]/60 transition-all"
-                >
-                  <span className="material-symbols-outlined text-[18px]">
-                    article
-                  </span>
-                  <span className="text-sm truncate">{item.title}</span>
-                </button>
-              ))
-            )}
-          </nav>
-
-          <div className="mt-auto pt-4 border-t border-[#c2c8c0]/20">
-            <button
-              type="button"
-              onClick={handleNewSummary}
-              className="w-full py-2.5 rounded-lg border border-[#737972] text-[#1a1c1c] font-semibold hover:bg-[#4a654f]/10 transition-colors flex items-center justify-center gap-2 text-sm"
-            >
-              <span className="material-symbols-outlined text-[18px]">add</span>
-              New Summary
-            </button>
-          </div>
-        </aside>
-
-        {/* CENTER MAIN CONTENT WORKSPACE */}
-        <main
-          className="flex-1 overflow-y-auto bg-[#faf9f8] paper-texture relative"
-          id="workspace"
-        >
-          <div className="max-w-[720px] mx-auto px-6 py-12">
-            {/* MAIN HEADER */}
-            <div className="text-center mb-12">
-              <h1 className="font-serif text-4xl md:text-5xl font-bold text-[#1a1c1c] mb-3">
-                Incite AI
-              </h1>
-              <p className="text-base text-[#424842] italic opacity-80">
-                Transform dense articles into actionable intelligence in
-                seconds.
-              </p>
+    <div className="flex h-screen bg-[#131314] text-[#E3E3E3] font-sans overflow-hidden antialiased">
+      {/* ----------------- CHATBOT SIDEBAR ----------------- */}
+      <aside
+        className={`${
+          sidebarOpen ? "w-72" : "w-0"
+        } transition-all duration-300 ease-in-out bg-[#1E1F20] border-r border-[#2D2F31] flex flex-col z-20 overflow-hidden shrink-0`}
+      >
+        <div className="p-4 flex items-center justify-between border-b border-[#2D2F31]">
+          <div className="flex items-center gap-2.5">
+            <div className="w-8 h-8 rounded-lg bg-gradient-to-tr from-blue-600 to-indigo-500 flex items-center justify-center font-bold text-white shadow-md">
+              <svg className="w-4 h-4 fill-current" viewBox="0 0 24 24">
+                <path d="M12 2L15.09 8.26L22 9.27L17 14.14L18.18 21.02L12 17.77L5.82 21.02L7 14.14L2 9.27L8.91 8.26L12 2Z" />
+              </svg>
             </div>
+            <span className="font-semibold text-lg tracking-tight text-white">
+              Incite AI
+            </span>
+          </div>
 
-            {/* INPUT SCRAPER BOX */}
-            <form onSubmit={handleScrape} className="space-y-8 mb-16">
-              <div className="flex items-center gap-3 border-b border-[#1a1c1c]/20 focus-within:border-[#4a654f] pb-3 transition-colors">
-                <span className="material-symbols-outlined text-[#424842]">
-                  link
-                </span>
-                <input
-                  id="url-input"
-                  aria-label="paste article url here"
-                  className="w-full bg-transparent border-none focus:outline-none text-base placeholder:text-[#424842]/40"
-                  placeholder="Paste article URL here..."
-                  type="url"
-                  required
-                  value={url}
-                  onChange={(e) => setUrl(e.target.value)}
-                />
-              </div>
+          <button
+            onClick={() => {
+              setActiveChat(null);
+              setError("");
+            }}
+            className="p-1.5 hover:bg-[#282A2C] rounded-lg text-gray-400 hover:text-white transition"
+            title="New Research Session"
+          >
+            <svg
+              className="w-5 h-5 stroke-current"
+              fill="none"
+              strokeWidth="2"
+              viewBox="0 0 24 24"
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                d="M12 4v16m8-8H4"
+              />
+            </svg>
+          </button>
+        </div>
 
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
-                <div className="space-y-3">
-                  <div className="flex justify-between items-center">
-                    <label
-                      htmlFor="summary-depth"
-                      className="text-xs font-bold uppercase tracking-widest text-[#424842]"
-                    >
-                      Summary Depth
-                    </label>
-                    <span className="text-sm font-semibold text-[#1a1c1c] capitalize">
-                      {length}
-                    </span>
-                  </div>
-                  <input
-                    id="summary-depth"
-                    className="range-slider"
-                    max="2"
-                    min="0"
-                    step="1"
-                    type="range"
-                    value={reverseLengthMapping[length]}
-                    onChange={(e) => setLength(lengthMapping[e.target.value])}
-                  />
-                  <div className="flex justify-between text-[10px] uppercase tracking-tighter text-[#424842]/60 font-bold">
-                    <span>Short</span>
-                    <span>Detailed</span>
-                  </div>
-                </div>
+        {/* History Chat Titles */}
+        <div className="flex-1 overflow-y-auto px-2 py-3 space-y-1">
+          <div className="px-3 pb-2 text-[11px] font-semibold text-gray-400 uppercase tracking-wider">
+            Recent Research
+          </div>
 
-                <div className="space-y-3">
-                  <div className="flex justify-between items-center">
-                    <label
-                      htmlFor="bullet-points"
-                      className="text-xs font-bold uppercase tracking-widest text-[#424842]"
-                    >
-                      Bullet Points
-                    </label>
-                    <span className="text-sm font-semibold text-[#1a1c1c]">
-                      {bullets}
-                    </span>
-                  </div>
-                  <input
-                    id="bullet-points"
-                    className="range-slider"
-                    max="7"
-                    min="1"
-                    step="1"
-                    type="range"
-                    value={bullets}
-                    onChange={(e) => setBullets(parseInt(e.target.value))}
-                  />
-                  <div className="flex justify-between text-[10px] uppercase tracking-tighter text-[#424842]/60 font-bold">
-                    <span>1</span>
-                    <span>7</span>
-                  </div>
-                </div>
-              </div>
-
-              <button
-                type="submit"
-                disabled={loading}
-                className="w-full py-3.5 border border-[#1a1c1c] text-[#1a1c1c] font-semibold flex items-center justify-center gap-2 hover:bg-[#1a1c1c] hover:text-[#faf9f8] transition-all duration-300 disabled:opacity-50"
-              >
-                <span
-                  className={`material-symbols-outlined text-[20px] ${loading ? "animate-spin" : ""}`}
+          {history.length === 0 ? (
+            <div className="text-center py-10 px-4 text-xs text-gray-500">
+              No saved chats yet. Enter an article link below to begin.
+            </div>
+          ) : (
+            history.map((item) => {
+              const isActive = activeChat?.id === item.id;
+              return (
+                <div
+                  key={item.id}
+                  onClick={() => {
+                    setActiveChat(item);
+                    setError("");
+                  }}
+                  className={`group relative flex items-center justify-between px-3 py-2.5 rounded-lg text-sm cursor-pointer transition ${
+                    isActive
+                      ? "bg-[#004A77] text-white font-medium"
+                      : "hover:bg-[#282A2C] text-gray-300"
+                  }`}
                 >
-                  {loading ? "progress_activity" : "auto_awesome"}
-                </span>
-                <span>
-                  {loading ? "Analyzing Source..." : "Generate Insight"}
-                </span>
-              </button>
-            </form>
-
-            {/* ERROR DISPLAY */}
-            {error && (
-              <div
-                role="alert"
-                className="mb-8 p-4 bg-[#ffdad6] text-[#93000a] rounded-lg text-sm border border-[#ba1a1a]/20"
-              >
-                ⚠️ {error}
-              </div>
-            )}
-
-            {/* ACTIVE RESULT CARD */}
-            {!loading && (title || summary.length > 0) && (
-              <div className="bg-[#f4f3f2] border border-[#c2c8c0]/30 p-6 mb-12 shadow-sm rounded-lg space-y-4">
-                <div className="flex justify-between items-start gap-4">
-                  <div>
-                    <span className="text-[10px] uppercase tracking-[0.2em] text-[#4a654f] font-bold mb-1 block">
-                      ACTIVE RESULT
-                    </span>
-                    <h3 className="font-serif text-2xl font-bold leading-snug text-[#1a1c1c]">
-                      {title}
-                    </h3>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() =>
-                      copyToClipboard(
-                        `### ${title}\n\n${summary.map((b) => `* ${b}`).join("\n")}`,
-                      )
-                    }
-                    className="flex items-center gap-1.5 text-xs font-semibold text-[#424842] hover:text-[#4a654f] transition-colors shrink-0"
-                  >
-                    <span className="material-symbols-outlined text-[16px]">
-                      {copied ? "check" : "content_copy"}
-                    </span>
-                    <span>{copied ? "Copied" : "Copy Summary"}</span>
-                  </button>
-                </div>
-
-                <div className="space-y-3 pt-2">
-                  {summary.map((point, idx) => (
-                    <div
-                      key={idx}
-                      className="flex gap-3 text-sm text-[#424842]"
-                    >
-                      <span className="text-[#4a654f] font-bold">
-                        {(idx + 1).toString().padStart(2, "0")}.
+                  <div className="flex items-center gap-2 overflow-hidden pr-10">
+                    {item.is_pinned && (
+                      <span className="text-yellow-400 text-xs shrink-0">
+                        📌
                       </span>
-                      <p className="leading-relaxed">{point}</p>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
+                    )}
+                    <span className="truncate">
+                      {item.title || "Untitled Summary"}
+                    </span>
+                  </div>
 
-            {/* HISTORY SECTION */}
-            <div className="space-y-6" id="history">
-              <div className="flex justify-between items-end border-b border-[#c2c8c0]/20 pb-3">
-                <h3 className="font-serif text-2xl font-bold text-[#1a1c1c]">
-                  History
-                </h3>
-                {history.length > 0 && (
-                  <div className="flex gap-4 text-xs font-semibold uppercase tracking-widest text-[#424842]/60">
+                  <div className="absolute right-2 hidden group-hover:flex items-center gap-1.5 bg-[#282A2C] px-1 py-0.5 rounded">
                     <button
-                      type="button"
-                      onClick={clearAllHistory}
-                      className="hover:text-[#ba1a1a] transition-colors"
+                      onClick={(e) => handleTogglePin(e, item.id)}
+                      className="p-1 text-gray-400 hover:text-yellow-400 transition"
+                      title={item.is_pinned ? "Unpin" : "Pin"}
                     >
-                      Clear All
+                      📌
+                    </button>
+                    <button
+                      onClick={(e) => handleDelete(e, item.id)}
+                      className="p-1 text-gray-400 hover:text-red-400 transition"
+                      title="Delete"
+                    >
+                      ✕
                     </button>
                   </div>
-                )}
-              </div>
+                </div>
+              );
+            })
+          )}
+        </div>
 
-              <div className="space-y-6">
-                {history.length === 0 ? (
-                  <div className="text-center py-12 text-[#424842]/40 italic text-sm">
-                    Your summarized research will appear here.
+        <div className="p-3 border-t border-[#2D2F31] text-[11px] text-gray-400 flex items-center justify-between">
+          <span>Incite Research Agent</span>
+          <span className="text-blue-400 font-mono">v1.2</span>
+        </div>
+      </aside>
+
+      {/* ----------------- CHAT CONVERSATION VIEW ----------------- */}
+      <main className="flex-1 flex flex-col relative h-full overflow-hidden bg-[#131314]">
+        {/* Top Chat Header */}
+        <header className="h-14 border-b border-[#2D2F31] px-4 flex items-center justify-between shrink-0">
+          <div className="flex items-center gap-3 overflow-hidden">
+            <button
+              onClick={() => setSidebarOpen(!sidebarOpen)}
+              className="p-2 hover:bg-[#282A2C] rounded-lg text-gray-400 hover:text-white transition"
+              title="Toggle Sidebar"
+            >
+              <svg
+                className="w-5 h-5 stroke-current"
+                fill="none"
+                strokeWidth="2"
+                viewBox="0 0 24 24"
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  d="M4 6h16M4 12h16M4 18h16"
+                />
+              </svg>
+            </button>
+            <span className="text-sm font-medium text-gray-200 truncate">
+              {activeChat ? activeChat.title : "New Research Session"}
+            </span>
+          </div>
+
+          {activeChat && (
+            <a
+              href={activeChat.url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="flex items-center gap-1.5 text-xs text-blue-400 hover:text-blue-300 bg-blue-500/10 px-3 py-1.5 rounded-full border border-blue-500/20 transition shrink-0"
+            >
+              <span>Source URL</span>
+              <span>↗</span>
+            </a>
+          )}
+        </header>
+
+        {/* Conversation Area */}
+        <div className="flex-1 overflow-y-auto px-4 py-8 max-w-4xl w-full mx-auto space-y-6">
+          {!activeChat ? (
+            <div className="h-full flex flex-col items-center justify-center text-center space-y-4 my-auto">
+              <div className="w-14 h-14 rounded-2xl bg-[#1E1F20] border border-[#2D2F31] flex items-center justify-center text-blue-400 shadow-xl">
+                <svg className="w-7 h-7 fill-current" viewBox="0 0 24 24">
+                  <path d="M12 2L15.09 8.26L22 9.27L17 14.14L18.18 21.02L12 17.77L5.82 21.02L7 14.14L2 9.27L8.91 8.26L12 2Z" />
+                </svg>
+              </div>
+              <h2 className="text-2xl font-semibold text-white tracking-tight">
+                Where should we focus today?
+              </h2>
+              <p className="text-sm text-gray-400 max-w-md leading-relaxed">
+                Paste any article or research paper link. Incite AI extracts
+                structural takeaways, assigns a smart topic title, and saves
+                everything to your database.
+              </p>
+            </div>
+          ) : (
+            <div className="space-y-6">
+              {/* User Article Link Bubble */}
+              <div className="flex justify-end">
+                <div className="bg-[#282A2C] border border-[#353739] text-gray-200 px-4 py-3 rounded-2xl rounded-tr-sm text-sm max-w-lg shadow-sm">
+                  <div className="text-[11px] text-gray-400 font-medium mb-1">
+                    Target Article
                   </div>
-                ) : (
-                  [...history]
-                    .sort((a, b) => (b.pinned ? 1 : 0) - (a.pinned ? 1 : 0))
-                    .map((item) => (
-                      <div
-                        key={item.id}
-                        onClick={() => loadHistoryItem(item)}
-                        className={`bg-[#f4f3f2] border ${
-                          item.pinned
-                            ? "border-[#4a654f]"
-                            : "border-[#c2c8c0]/20"
-                        } p-6 hover:border-[#4a654f]/40 transition-all cursor-pointer relative group rounded-sm`}
+                  <a
+                    href={activeChat.url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-blue-400 hover:underline break-all font-mono text-xs"
+                  >
+                    {activeChat.url}
+                  </a>
+                </div>
+              </div>
+
+              {/* AI Response Bubble */}
+              <div className="flex gap-4">
+                <div className="w-8 h-8 rounded-full bg-gradient-to-tr from-blue-600 to-indigo-500 flex items-center justify-center text-white shrink-0 mt-1 shadow-md">
+                  <svg className="w-4 h-4 fill-current" viewBox="0 0 24 24">
+                    <path d="M12 2L15.09 8.26L22 9.27L17 14.14L18.18 21.02L12 17.77L5.82 21.02L7 14.14L2 9.27L8.91 8.26L12 2Z" />
+                  </svg>
+                </div>
+
+                <div className="flex-1 bg-[#1E1F20] border border-[#2D2F31] rounded-2xl rounded-tl-sm p-6 shadow-sm">
+                  <div className="flex items-center justify-between pb-4 border-b border-[#2D2F31] mb-4">
+                    <h1 className="text-lg font-semibold text-white tracking-tight">
+                      {activeChat.title}
+                    </h1>
+                    <button
+                      onClick={() =>
+                        handleCopy(activeChat.id, activeChat.summary)
+                      }
+                      className="flex items-center gap-1.5 text-xs text-gray-400 hover:text-white transition bg-[#282A2C] px-2.5 py-1.5 rounded-lg border border-[#353739]"
+                      title="Copy Takeaways"
+                    >
+                      {copiedId === activeChat.id ? (
+                        <span className="text-green-400 font-medium">
+                          ✓ Copied
+                        </span>
+                      ) : (
+                        <span>Copy</span>
+                      )}
+                    </button>
+                  </div>
+
+                  {/* Bullet Points */}
+                  <ul className="space-y-3.5">
+                    {activeChat.summary.map((point, idx) => (
+                      <li
+                        key={idx}
+                        className="flex items-start gap-3 text-sm text-gray-300 leading-relaxed"
                       >
-                        <div className="flex justify-between items-start mb-3 gap-4">
-                          <div>
-                            <span className="text-[10px] uppercase tracking-[0.2em] text-[#4a654f] font-bold mb-1 block">
-                              {getDomain(item.url) || "ARTICLE"} •{" "}
-                              {item.date || "TODAY"}
-                            </span>
-                            <h4 className="font-serif text-xl font-bold leading-snug text-[#1a1c1c]">
-                              {item.title}
-                            </h4>
-                          </div>
-                          <div className="flex gap-2 shrink-0">
-                            <button
-                              type="button"
-                              aria-label={
-                                item.pinned ? "Unpin summary" : "Pin summary"
-                              }
-                              onClick={(e) => togglePin(item.id, e)}
-                              className={`material-symbols-outlined text-[20px] transition-colors ${
-                                item.pinned
-                                  ? "text-[#4a654f]"
-                                  : "text-[#424842]/30 group-hover:text-[#4a654f]"
-                              }`}
-                            >
-                              push_pin
-                            </button>
-                            <button
-                              type="button"
-                              aria-label="Delete summary"
-                              onClick={(e) => deleteHistoryItem(item.id, e)}
-                              className="material-symbols-outlined text-[20px] text-[#424842]/30 hover:text-[#ba1a1a] transition-colors"
-                            >
-                              delete
-                            </button>
-                          </div>
-                        </div>
+                        <span className="w-1.5 h-1.5 rounded-full bg-blue-400 mt-2 shrink-0" />
+                        <span>{point}</span>
+                      </li>
+                    ))}
+                  </ul>
 
-                        <div className="space-y-2.5 mb-6">
-                          {item.summary &&
-                            item.summary.map((point, idx) => (
-                              <div
-                                key={idx}
-                                className="flex gap-3 text-sm text-[#424842]"
-                              >
-                                <span className="text-[#4a654f] font-bold">
-                                  {(idx + 1).toString().padStart(2, "0")}.
-                                </span>
-                                <p className="leading-relaxed line-clamp-2">
-                                  {point}
-                                </p>
-                              </div>
-                            ))}
-                        </div>
+                  {/* Badges */}
+                  <div className="flex items-center gap-2 mt-6 pt-4 border-t border-[#2D2F31] text-[11px] text-gray-400 font-mono">
+                    <span className="bg-[#282A2C] px-2.5 py-1 rounded-md border border-[#353739]">
+                      Depth: {activeChat.length?.toUpperCase()}
+                    </span>
+                    <span className="bg-[#282A2C] px-2.5 py-1 rounded-md border border-[#353739]">
+                      Bullets: {activeChat.bullets}
+                    </span>
+                    {activeChat.created_at && (
+                      <span className="text-gray-500 ml-auto">
+                        {new Date(activeChat.created_at).toLocaleDateString()}
+                      </span>
+                    )}
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
 
-                        <div className="flex justify-end items-center pt-2">
-                          <button
-                            type="button"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              copyToClipboard(
-                                `### ${item.title}\n\n${(item.summary || []).map((b) => `* ${b}`).join("\n")}`,
-                              );
-                            }}
-                            className="flex items-center gap-1 text-xs font-semibold text-[#424842] hover:text-[#4a654f] transition-colors"
-                          >
-                            <span className="material-symbols-outlined text-[16px]">
-                              content_copy
-                            </span>
-                            <span>Copy Summary</span>
-                          </button>
-                        </div>
-                      </div>
-                    ))
+          {error && (
+            <div className="p-4 rounded-xl bg-red-950/40 border border-red-500/30 text-red-300 text-sm flex items-center gap-3">
+              <span className="text-lg">⚠️</span>
+              <p>{error}</p>
+            </div>
+          )}
+        </div>
+
+        {/* ----------------- FLOATING PROMPT PILL DOCK ----------------- */}
+        <div className="p-4 max-w-4xl w-full mx-auto shrink-0">
+          <form
+            onSubmit={handleSummarize}
+            className="bg-[#1E1F20] border border-[#2D2F31] focus-within:border-blue-500 rounded-2xl p-2.5 shadow-2xl transition"
+          >
+            <div className="flex items-center gap-2 px-2">
+              <input
+                type="url"
+                placeholder="Paste article link (e.g., https://en.wikipedia.org/wiki/Artificial_intelligence)"
+                value={url}
+                onChange={(e) => setUrl(e.target.value)}
+                disabled={loading}
+                required
+                className="flex-1 bg-transparent text-sm text-white placeholder-gray-500 focus:outline-none py-1"
+              />
+              <button
+                type="submit"
+                disabled={loading || !url.trim()}
+                className="w-9 h-9 rounded-xl bg-blue-600 hover:bg-blue-500 disabled:opacity-40 disabled:hover:bg-blue-600 flex items-center justify-center text-white transition shrink-0 shadow-md"
+              >
+                {loading ? (
+                  <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                ) : (
+                  <svg
+                    className="w-4 h-4 fill-current rotate-45 -mr-0.5"
+                    viewBox="0 0 24 24"
+                  >
+                    <path d="M2 21L23 12L2 3V10L17 12L2 14V21Z" />
+                  </svg>
                 )}
-              </div>
+              </button>
             </div>
-          </div>
-        </main>
 
-        {/* RIGHT INSIGHTS SIDEBAR (real stats from your history) */}
-        <aside className="hidden xl:flex flex-col w-80 bg-[#e9e8e7]/30 border-l border-[#c2c8c0]/20 p-6 overflow-y-auto shrink-0">
-          <h5 className="text-[11px] font-bold uppercase tracking-[0.2em] text-[#424842]/60 mb-6">
-            Reading Insights
-          </h5>
-          <div className="space-y-4">
-            <div className="p-4 bg-[#faf9f8] rounded-lg border border-[#c2c8c0]/20 shadow-sm">
-              <p className="text-[10px] font-bold text-[#4a654f] uppercase mb-1.5 tracking-wider">
-                Articles Analyzed
-              </p>
-              <p className="font-serif text-3xl font-bold text-[#1a1c1c]">
-                {history.length}
-              </p>
-            </div>
-            <div className="p-4 bg-[#faf9f8] rounded-lg border border-[#c2c8c0]/20 shadow-sm">
-              <p className="text-[10px] font-bold text-[#4a654f] uppercase mb-1.5 tracking-wider">
-                Pinned
-              </p>
-              <p className="font-serif text-3xl font-bold text-[#1a1c1c]">
-                {pinnedCount}
-              </p>
-            </div>
-            {latest && getDomain(latest.url) && (
-              <div className="p-4 bg-[#faf9f8] rounded-lg border border-[#c2c8c0]/20 shadow-sm">
-                <p className="text-[10px] font-bold text-[#4a654f] uppercase mb-1.5 tracking-wider">
-                  Latest Source
-                </p>
-                <p className="text-sm text-[#1a1c1c] break-words">
-                  {getDomain(latest.url)}
-                </p>
+            {/* Config Controls */}
+            <div className="flex items-center gap-4 px-2 pt-2.5 mt-2 border-t border-[#2D2F31] text-xs">
+              <span className="text-gray-400 font-medium">Parameters:</span>
+
+              {/* Bullet Count Selector */}
+              <div className="flex items-center gap-1.5">
+                <label className="text-gray-400">Bullets:</label>
+                <select
+                  value={bullets}
+                  onChange={(e) => setBullets(Number(e.target.value))}
+                  className="bg-[#282A2C] text-gray-200 border border-[#353739] rounded-md px-2 py-0.5 text-xs focus:outline-none"
+                >
+                  {[1, 2, 3, 4, 5, 6, 7].map((num) => (
+                    <option key={num} value={num}>
+                      {num} points
+                    </option>
+                  ))}
+                </select>
               </div>
-            )}
-          </div>
-        </aside>
-      </div>
+
+              {/* Depth Selector */}
+              <div className="flex items-center gap-1.5">
+                <label className="text-gray-400">Depth:</label>
+                <select
+                  value={length}
+                  onChange={(e) => setLength(e.target.value)}
+                  className="bg-[#282A2C] text-gray-200 border border-[#353739] rounded-md px-2 py-0.5 text-xs focus:outline-none capitalize"
+                >
+                  <option value="short">Short (Snappy)</option>
+                  <option value="medium">Medium (Balanced)</option>
+                  <option value="detailed">Detailed (In-depth)</option>
+                </select>
+              </div>
+            </div>
+          </form>
+        </div>
+      </main>
     </div>
   );
 }
-
-export default App;
