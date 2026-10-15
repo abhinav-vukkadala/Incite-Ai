@@ -18,6 +18,8 @@ export default function App() {
     }
   });
 
+  // Track explicitly whether user clicked "+" to start a new chat
+  const [isNewChat, setIsNewChat] = useState(false);
   const [activeChat, setActiveChat] = useState(null);
   const [url, setUrl] = useState("");
   const [length, setLength] = useState("medium");
@@ -35,6 +37,27 @@ export default function App() {
       console.error("Failed to write to localStorage:", e);
     }
   }, [history]);
+
+  // Sort history: pinned items first, then newer items
+  const sortedHistory = [...history].sort((a, b) => {
+    if (Boolean(b.is_pinned) !== Boolean(a.is_pinned)) {
+      return (b.is_pinned ? 1 : 0) - (a.is_pinned ? 1 : 0);
+    }
+    return (b.id || 0) - (a.id || 0);
+  });
+
+  const handleStartNewChat = () => {
+    setIsNewChat(true);
+    setActiveChat(null);
+    setUrl("");
+    setError("");
+  };
+
+  const handleSelectChat = (item) => {
+    setIsNewChat(false);
+    setActiveChat(item);
+    setError("");
+  };
 
   const handleSummarize = async (e) => {
     if (e) e.preventDefault();
@@ -68,6 +91,7 @@ export default function App() {
         return next;
       });
 
+      setIsNewChat(false);
       setActiveChat(data);
       setUrl("");
     } catch (err) {
@@ -79,19 +103,29 @@ export default function App() {
 
   const handleTogglePin = async (e, id) => {
     e.stopPropagation();
+
+    // Optimistically toggle pin status in local state immediately
+    setHistory((prev) => {
+      const updated = prev.map((item) =>
+        item.id === id ? { ...item, is_pinned: !item.is_pinned } : item,
+      );
+      try {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(updated));
+      } catch {}
+      return updated;
+    });
+
+    if (activeChat?.id === id) {
+      setActiveChat((prev) =>
+        prev ? { ...prev, is_pinned: !prev.is_pinned } : null,
+      );
+    }
+
+    // Attempt backend sync
     try {
-      const res = await fetch(`${API_URL}/history/${id}/pin`, {
-        method: "PATCH",
-      });
-      if (res.ok) {
-        const updated = await res.json();
-        setHistory((prev) =>
-          prev.map((item) => (item.id === id ? updated : item)),
-        );
-        if (activeChat?.id === id) setActiveChat(updated);
-      }
+      await fetch(`${API_URL}/history/${id}/pin`, { method: "PATCH" });
     } catch (err) {
-      console.error("Failed to toggle pin:", err);
+      console.warn("Backend pin sync offline/unavailable:", err);
     }
   };
 
@@ -100,6 +134,7 @@ export default function App() {
     try {
       await fetch(`${API_URL}/history/${id}`, { method: "DELETE" });
     } catch {}
+
     setHistory((prev) => {
       const updated = prev.filter((item) => item.id !== id);
       if (activeChat?.id === id) {
@@ -116,7 +151,10 @@ export default function App() {
     setTimeout(() => setCopiedId(null), 2000);
   };
 
-  const activeOrLatest = activeChat || (history.length > 0 ? history[0] : null);
+  // Determine which article to render
+  const currentChat = isNewChat
+    ? null
+    : activeChat || (sortedHistory.length > 0 ? sortedHistory[0] : null);
 
   return (
     <div className="flex h-screen bg-[#131314] text-[#E3E3E3] font-sans overflow-hidden antialiased">
@@ -139,11 +177,8 @@ export default function App() {
           </div>
 
           <button
-            onClick={() => {
-              setActiveChat(null);
-              setError("");
-            }}
-            className="p-1.5 hover:bg-[#282A2C] rounded-lg text-gray-400 hover:text-white transition"
+            onClick={handleStartNewChat}
+            className="p-1.5 hover:bg-[#282A2C] rounded-lg text-gray-400 hover:text-white transition flex items-center gap-1 text-xs"
             title="New Research Session"
           >
             <svg
@@ -167,49 +202,54 @@ export default function App() {
             Recent Research
           </div>
 
-          {history.length === 0 ? (
+          {sortedHistory.length === 0 ? (
             <div className="text-center py-10 px-4 text-xs text-gray-500">
               No saved chats yet.
             </div>
           ) : (
-            history.map((item) => {
-              const isActive = activeOrLatest?.id === item.id;
+            sortedHistory.map((item) => {
+              const isActive = !isNewChat && currentChat?.id === item.id;
               return (
                 <div
                   key={item.id}
-                  onClick={() => {
-                    setActiveChat(item);
-                    setError("");
-                  }}
+                  onClick={() => handleSelectChat(item)}
                   className={`group relative flex items-center justify-between px-3 py-2.5 rounded-lg text-sm cursor-pointer transition ${
                     isActive
                       ? "bg-[#004A77] text-white font-medium"
                       : "hover:bg-[#282A2C] text-gray-300"
                   }`}
                 >
-                  <div className="flex items-center gap-2 overflow-hidden pr-8">
-                    {item.is_pinned && (
-                      <span className="text-yellow-400 text-xs shrink-0">
+                  <div className="flex items-center gap-2 overflow-hidden pr-10">
+                    {item.is_pinned ? (
+                      <span
+                        className="text-yellow-400 text-xs shrink-0"
+                        title="Pinned"
+                      >
                         📌
                       </span>
-                    )}
+                    ) : null}
                     <span className="truncate">
                       {item.title || "Untitled Summary"}
                     </span>
                   </div>
 
-                  <div className="absolute right-2 hidden group-hover:flex items-center gap-1.5 bg-[#282A2C] px-1 py-0.5 rounded">
+                  {/* Actions overlay: pin & delete */}
+                  <div className="absolute right-2 flex items-center gap-1.5 bg-[#1E1F20] px-1 py-0.5 rounded opacity-0 group-hover:opacity-100 transition-opacity">
                     <button
                       onClick={(e) => handleTogglePin(e, item.id)}
-                      className="p-1 text-gray-400 hover:text-yellow-400 transition"
-                      title={item.is_pinned ? "Unpin" : "Pin"}
+                      className={`p-1 text-xs transition ${
+                        item.is_pinned
+                          ? "text-yellow-400"
+                          : "text-gray-400 hover:text-yellow-300"
+                      }`}
+                      title={item.is_pinned ? "Unpin chat" : "Pin to top"}
                     >
                       📌
                     </button>
                     <button
                       onClick={(e) => handleDelete(e, item.id)}
-                      className="p-1 text-gray-400 hover:text-red-400 transition"
-                      title="Delete"
+                      className="p-1 text-xs text-gray-400 hover:text-red-400 transition"
+                      title="Delete chat"
                     >
                       ✕
                     </button>
@@ -245,13 +285,13 @@ export default function App() {
               </svg>
             </button>
             <span className="text-sm font-medium text-gray-200 truncate">
-              {activeOrLatest ? activeOrLatest.title : "Research Session"}
+              {currentChat ? currentChat.title : "New Research Session"}
             </span>
           </div>
 
-          {activeOrLatest?.url && (
+          {currentChat?.url && (
             <a
-              href={activeOrLatest.url}
+              href={currentChat.url}
               target="_blank"
               rel="noopener noreferrer"
               className="text-xs text-blue-400 hover:underline shrink-0"
@@ -263,24 +303,29 @@ export default function App() {
 
         {/* Content Display */}
         <div className="flex-1 overflow-y-auto px-4 py-6 max-w-4xl w-full mx-auto space-y-6">
-          {activeOrLatest ? (
+          {currentChat ? (
             <div className="bg-[#1E1F20] border border-[#2D2F31] rounded-2xl p-6 shadow-sm">
               <div className="flex items-center justify-between pb-4 border-b border-[#2D2F31] mb-4">
-                <h1 className="text-lg font-semibold text-white tracking-tight">
-                  {activeOrLatest.title}
-                </h1>
+                <div className="flex items-center gap-2 truncate pr-4">
+                  {currentChat.is_pinned && (
+                    <span className="text-yellow-400 text-sm">📌</span>
+                  )}
+                  <h1 className="text-lg font-semibold text-white tracking-tight truncate">
+                    {currentChat.title}
+                  </h1>
+                </div>
                 <button
                   onClick={() =>
-                    handleCopy(activeOrLatest.id, activeOrLatest.summary)
+                    handleCopy(currentChat.id, currentChat.summary)
                   }
-                  className="text-xs text-gray-400 hover:text-white bg-[#282A2C] px-2.5 py-1.5 rounded-lg border border-[#353739]"
+                  className="text-xs text-gray-400 hover:text-white bg-[#282A2C] px-2.5 py-1.5 rounded-lg border border-[#353739] shrink-0"
                 >
-                  {copiedId === activeOrLatest.id ? "✓ Copied" : "Copy"}
+                  {copiedId === currentChat.id ? "✓ Copied" : "Copy"}
                 </button>
               </div>
 
               <ul className="space-y-3">
-                {activeOrLatest.summary?.map((point, idx) => (
+                {currentChat.summary?.map((point, idx) => (
                   <li
                     key={idx}
                     className="flex items-start gap-3 text-sm text-gray-300 leading-relaxed"
@@ -293,8 +338,13 @@ export default function App() {
             </div>
           ) : (
             <div className="h-64 flex flex-col items-center justify-center text-center space-y-3 text-gray-400">
+              <div className="w-12 h-12 rounded-2xl bg-[#1E1F20] border border-[#2D2F31] flex items-center justify-center text-blue-400 mb-2">
+                <svg className="w-6 h-6 fill-current" viewBox="0 0 24 24">
+                  <path d="M12 2L15.09 8.26L22 9.27L17 14.14L18.18 21.02L12 17.77L5.82 21.02L7 14.14L2 9.27L8.91 8.26L12 2Z" />
+                </svg>
+              </div>
               <h2 className="text-xl font-medium text-gray-200">
-                Ready to summarize
+                New Research Session
               </h2>
               <p className="text-xs max-w-sm">
                 Paste an article URL below to extract key insights.
