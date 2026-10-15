@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useMemo, useRef } from "react";
 
 const API_URL = (
   import.meta.env.VITE_API_URL ||
@@ -7,12 +7,44 @@ const API_URL = (
 ).replace(/\/$/, "");
 
 const STORAGE_KEY = "incite_ai_history";
+const MAX_HISTORY = 100;
+
+function safeSourceUrl(value) {
+  try {
+    const parsed = new URL(value);
+    return ["http:", "https:"].includes(parsed.protocol) &&
+      !parsed.username &&
+      !parsed.password
+      ? parsed.href
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function validSummary(item) {
+  return (
+    item &&
+    Number.isSafeInteger(item.id) &&
+    typeof item.title === "string" &&
+    item.title.length <= 512 &&
+    Array.isArray(item.summary) &&
+    item.summary.length >= 1 &&
+    item.summary.length <= 7 &&
+    item.summary.every(
+      (point) => typeof point === "string" && point.length <= 2000,
+    )
+  );
+}
 
 export default function App() {
   const [history, setHistory] = useState(() => {
     try {
       const saved = localStorage.getItem(STORAGE_KEY);
-      return saved ? JSON.parse(saved) : [];
+      const parsed = saved ? JSON.parse(saved) : [];
+      return Array.isArray(parsed)
+        ? parsed.filter(validSummary).slice(0, MAX_HISTORY)
+        : [];
     } catch {
       return [];
     }
@@ -26,8 +58,19 @@ export default function App() {
   const [bullets, setBullets] = useState(5);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
-  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [sidebarOpen, setSidebarOpen] = useState(
+    () => window.innerWidth >= 768,
+  );
   const [copiedId, setCopiedId] = useState(null);
+  const requestRef = useRef(null);
+  const copyTimerRef = useRef(null);
+  useEffect(
+    () => () => {
+      requestRef.current?.abort();
+      clearTimeout(copyTimerRef.current);
+    },
+    [],
+  );
 
   // Sync state to localStorage whenever history changes
   useEffect(() => {
@@ -39,18 +82,26 @@ export default function App() {
   }, [history]);
 
   // Sort history: pinned items first, then newer items
-  const sortedHistory = [...history].sort((a, b) => {
-    if (Boolean(b.is_pinned) !== Boolean(a.is_pinned)) {
-      return (b.is_pinned ? 1 : 0) - (a.is_pinned ? 1 : 0);
-    }
-    return (b.id || 0) - (a.id || 0);
-  });
+  const sortedHistory = useMemo(
+    () =>
+      [...history].sort((a, b) => {
+        if (Boolean(b.is_pinned) !== Boolean(a.is_pinned)) {
+          return (b.is_pinned ? 1 : 0) - (a.is_pinned ? 1 : 0);
+        }
+        return (
+          (Date.parse(b.created_at) || b.id || 0) -
+          (Date.parse(a.created_at) || a.id || 0)
+        );
+      }),
+    [history],
+  );
 
   const handleStartNewChat = () => {
     setIsNewChat(true);
     setActiveChat(null);
     setUrl("");
     setError("");
+    if (window.innerWidth < 768) setSidebarOpen(false);
   };
 
   const handleSelectChat = (item) => {
@@ -64,12 +115,30 @@ export default function App() {
     const targetUrl = url.trim();
     if (!targetUrl || loading) return;
 
+    try {
+      if (!safeSourceUrl(targetUrl) || targetUrl.length > 2048)
+        throw new Error();
+    } catch {
+      setError("Enter a valid public http(s) article URL.");
+      return;
+    }
     setError("");
     setLoading(true);
+    const controller = new AbortController();
+    requestRef.current = controller;
+    let timedOut = false;
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, 65000);
 
     try {
       const res = await fetch(`${API_URL}/scrape`, {
         method: "POST",
+        signal: controller.signal,
+        cache: "no-store",
+        credentials: "omit",
+        referrerPolicy: "no-referrer",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           url: targetUrl,
@@ -78,77 +147,84 @@ export default function App() {
         }),
       });
 
-      const data = await res.json();
+      const data = await res.json().catch(() => null);
       if (!res.ok) {
-        throw new Error(data.detail || "Unable to summarize article.");
+        throw new Error(
+          typeof data?.detail === "string"
+            ? data.detail
+            : res.status === 429
+              ? "Too many requests. Please wait a minute and try again."
+              : "Unable to summarize article. Please try again.",
+        );
       }
 
-      setHistory((prev) => {
-        const next = [data, ...prev.filter((item) => item.id !== data.id)];
-        try {
-          localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
-        } catch {}
-        return next;
-      });
+      if (controller.signal.aborted)
+        throw new DOMException("Cancelled", "AbortError");
+      if (!validSummary(data)) {
+        throw new Error(
+          "The server returned an invalid summary. Please try again.",
+        );
+      }
+      setHistory((prev) =>
+        [data, ...prev.filter((item) => item.id !== data.id)].slice(
+          0,
+          MAX_HISTORY,
+        ),
+      );
 
       setIsNewChat(false);
       setActiveChat(data);
       setUrl("");
     } catch (err) {
-      setError(err.message || "Failed to reach backend.");
+      setError(
+        err.name === "AbortError"
+          ? timedOut
+            ? "The request timed out. Please try again."
+            : "Request cancelled."
+          : err.message || "Failed to reach backend.",
+      );
     } finally {
+      clearTimeout(timeout);
+      requestRef.current = null;
       setLoading(false);
     }
   };
 
-  const handleTogglePin = async (e, id) => {
+  const handleTogglePin = (e, id) => {
     e.stopPropagation();
 
-    // Optimistically toggle pin status in local state immediately
-    setHistory((prev) => {
-      const updated = prev.map((item) =>
+    setHistory((prev) =>
+      prev.map((item) =>
         item.id === id ? { ...item, is_pinned: !item.is_pinned } : item,
-      );
-      try {
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(updated));
-      } catch {}
-      return updated;
-    });
+      ),
+    );
 
     if (activeChat?.id === id) {
       setActiveChat((prev) =>
         prev ? { ...prev, is_pinned: !prev.is_pinned } : null,
       );
     }
-
-    // Attempt backend sync
-    try {
-      await fetch(`${API_URL}/history/${id}/pin`, { method: "PATCH" });
-    } catch (err) {
-      console.warn("Backend pin sync offline/unavailable:", err);
-    }
   };
 
-  const handleDelete = async (e, id) => {
+  const handleDelete = (e, id) => {
     e.stopPropagation();
-    try {
-      await fetch(`${API_URL}/history/${id}`, { method: "DELETE" });
-    } catch {}
-
-    setHistory((prev) => {
-      const updated = prev.filter((item) => item.id !== id);
-      if (activeChat?.id === id) {
-        setActiveChat(updated.length > 0 ? updated[0] : null);
-      }
-      return updated;
-    });
+    setHistory((prev) => prev.filter((item) => item.id !== id));
+    if (activeChat?.id === id) setActiveChat(null);
   };
 
-  const handleCopy = (id, bulletsList) => {
+  const handleCopy = async (id, bulletsList) => {
     if (!bulletsList) return;
-    navigator.clipboard.writeText(bulletsList.map((b) => `• ${b}`).join("\n"));
+    try {
+      await navigator.clipboard.writeText(
+        bulletsList.map((b) => `• ${b}`).join("\n"),
+      );
+    } catch {
+      setError("Unable to copy. Select the summary text and copy it manually.");
+      return;
+    }
     setCopiedId(id);
-    setTimeout(() => setCopiedId(null), 2000);
+    clearTimeout(copyTimerRef.current);
+    copyTimerRef.current = setTimeout(() => setCopiedId(null), 2000);
   };
 
   // Determine which article to render
@@ -157,12 +233,15 @@ export default function App() {
     : activeChat || (sortedHistory.length > 0 ? sortedHistory[0] : null);
 
   return (
-    <div className="flex h-screen bg-[#131314] text-[#E3E3E3] font-sans overflow-hidden antialiased">
+    <div className="flex h-dvh bg-[#131314] text-[#E3E3E3] font-sans overflow-hidden antialiased">
       {/* ----------------- CHATBOT SIDEBAR ----------------- */}
       <aside
+        id="research-history"
+        aria-label="Saved summaries"
+        inert={!sidebarOpen}
         className={`${
           sidebarOpen ? "w-72" : "w-0"
-        } transition-all duration-300 ease-in-out bg-[#1E1F20] border-r border-[#2D2F31] flex flex-col z-20 overflow-hidden shrink-0`}
+        } max-md:absolute max-md:h-full transition-all duration-300 ease-in-out bg-[#1E1F20] border-r border-[#2D2F31] flex flex-col z-20 overflow-hidden shrink-0`}
       >
         <div className="p-4 flex items-center justify-between border-b border-[#2D2F31]">
           <div className="flex items-center gap-2.5">
@@ -196,6 +275,27 @@ export default function App() {
           </button>
         </div>
 
+        <div className="flex justify-between px-4 py-2 text-xs">
+          <button
+            type="button"
+            onClick={() => {
+              setHistory([]);
+              setActiveChat(null);
+              setIsNewChat(true);
+            }}
+            className="text-gray-400 hover:text-white"
+          >
+            Clear history
+          </button>
+          <button
+            type="button"
+            onClick={() => setSidebarOpen(false)}
+            className="text-gray-400 hover:text-white md:hidden"
+            aria-label="Close sidebar"
+          >
+            Close
+          </button>
+        </div>
         {/* History List */}
         <div className="flex-1 overflow-y-auto px-2 py-3 space-y-1">
           <div className="px-3 pb-2 text-[11px] font-semibold text-gray-400 uppercase tracking-wider">
@@ -212,7 +312,6 @@ export default function App() {
               return (
                 <div
                   key={item.id}
-                  onClick={() => handleSelectChat(item)}
                   className={`group relative flex items-center justify-between px-3 py-2.5 rounded-lg text-sm cursor-pointer transition ${
                     isActive
                       ? "bg-[#004A77] text-white font-medium"
@@ -228,13 +327,21 @@ export default function App() {
                         📌
                       </span>
                     ) : null}
-                    <span className="truncate">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        handleSelectChat(item);
+                        if (window.innerWidth < 768) setSidebarOpen(false);
+                      }}
+                      aria-current={isActive ? "true" : undefined}
+                      className="truncate text-left focus-visible:underline"
+                    >
                       {item.title || "Untitled Summary"}
-                    </span>
+                    </button>
                   </div>
 
                   {/* Actions overlay: pin & delete */}
-                  <div className="absolute right-2 flex items-center gap-1.5 bg-[#1E1F20] px-1 py-0.5 rounded opacity-0 group-hover:opacity-100 transition-opacity">
+                  <div className="absolute right-2 flex items-center gap-1.5 bg-[#1E1F20] px-1 py-0.5 rounded opacity-100 md:opacity-0 md:group-hover:opacity-100 md:group-focus-within:opacity-100 transition-opacity">
                     <button
                       onClick={(e) => handleTogglePin(e, item.id)}
                       className={`p-1 text-xs transition ${
@@ -262,7 +369,7 @@ export default function App() {
       </aside>
 
       {/* ----------------- MAIN VIEW ----------------- */}
-      <main className="flex-1 flex flex-col relative h-full overflow-hidden bg-[#131314]">
+      <main className="min-w-0 flex-1 flex flex-col relative h-full overflow-hidden bg-[#131314]">
         {/* Header */}
         <header className="h-14 border-b border-[#2D2F31] px-4 flex items-center justify-between shrink-0">
           <div className="flex items-center gap-3 overflow-hidden">
@@ -270,6 +377,8 @@ export default function App() {
               onClick={() => setSidebarOpen(!sidebarOpen)}
               className="p-2 hover:bg-[#282A2C] rounded-lg text-gray-400 hover:text-white transition"
               title="Toggle Sidebar"
+              aria-expanded={sidebarOpen}
+              aria-controls="research-history"
             >
               <svg
                 className="w-5 h-5 stroke-current"
@@ -289,9 +398,9 @@ export default function App() {
             </span>
           </div>
 
-          {currentChat?.url && (
+          {safeSourceUrl(currentChat?.url) && (
             <a
-              href={currentChat.url}
+              href={safeSourceUrl(currentChat.url)}
               target="_blank"
               rel="noopener noreferrer"
               className="text-xs text-blue-400 hover:underline shrink-0"
@@ -352,8 +461,25 @@ export default function App() {
             </div>
           )}
 
+          {loading && (
+            <div className="flex items-center gap-3">
+              <p role="status" className="text-sm text-gray-400">
+                Reading the article and generating insights…
+              </p>
+              <button
+                type="button"
+                onClick={() => requestRef.current?.abort()}
+                className="text-sm text-blue-400"
+              >
+                Cancel
+              </button>
+            </div>
+          )}
           {error && (
-            <div className="p-4 rounded-xl bg-red-950/40 border border-red-500/30 text-red-300 text-sm">
+            <div
+              role="alert"
+              className="p-4 rounded-xl bg-red-950/40 border border-red-500/30 text-red-300 text-sm"
+            >
               {error}
             </div>
           )}
@@ -368,11 +494,14 @@ export default function App() {
             <div className="flex items-center gap-2">
               <input
                 type="url"
+                aria-label="Article URL"
+                required
+                maxLength={2048}
                 placeholder="Paste article URL here"
                 value={url}
                 onChange={(e) => setUrl(e.target.value)}
                 disabled={loading}
-                className="flex-1 bg-transparent text-sm text-white placeholder-gray-500 focus:outline-none px-2"
+                className="min-w-0 flex-1 bg-transparent text-sm text-white placeholder-gray-500 focus:outline-none px-2"
               />
               <button
                 type="submit"
@@ -391,6 +520,7 @@ export default function App() {
                 </label>
                 <input
                   id="bullet-slider"
+                  disabled={loading}
                   type="range"
                   min="1"
                   max="7"
@@ -405,8 +535,12 @@ export default function App() {
               </div>
 
               <div className="flex items-center gap-2">
-                <span className="text-gray-400">Depth:</span>
+                <label htmlFor="summary-depth" className="text-gray-400">
+                  Depth:
+                </label>
                 <select
+                  id="summary-depth"
+                  disabled={loading}
                   value={length}
                   onChange={(e) => setLength(e.target.value)}
                   className="bg-[#282A2C] text-gray-300 border border-[#353739] rounded px-2 py-0.5 text-xs focus:outline-none"
@@ -418,6 +552,11 @@ export default function App() {
               </div>
             </div>
           </form>
+          <p className="mt-2 text-center text-xs text-gray-400">
+            AI summaries can miss context. Verify details with the source.
+            History is saved on this device (up to 100 summaries). Article text
+            is sent to Gemini for processing.
+          </p>
         </div>
       </main>
     </div>
